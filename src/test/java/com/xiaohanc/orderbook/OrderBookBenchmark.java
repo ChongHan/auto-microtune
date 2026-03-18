@@ -4,30 +4,32 @@ import org.openjdk.jmh.annotations.*;
 import org.openjdk.jmh.profile.AsyncProfiler;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.options.*;
+import net.openhft.affinity.AffinityLock;
+import net.openhft.affinity.AffinityStrategies;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Random;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 @State(Scope.Benchmark)
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.MICROSECONDS)
 @Warmup(iterations = 3, time = 2)
-@Measurement(iterations = 5, time = 2)
+@Measurement(iterations = 5, time = 3)
 @Fork(value = 1)
 public class OrderBookBenchmark {
 
     private List<OrderBookCommand> commands;
     private OrderBook orderBook;
+    private AffinityLock affinityLock;
 
     @Setup(Level.Trial)
     public void setup() {
+        affinityLock = AffinityLock.acquireLock(11);
         int numCommands = 1_000_000;
         commands = new ArrayList<>(numCommands);
         Random random = new Random(42);
@@ -37,7 +39,12 @@ public class OrderBookBenchmark {
         Counter matchCounter = new Counter();
         OrderBook simBook = new OrderBookImpl((mId, tId, p, q) -> matchCounter.count++);
         
-        long nextOrderId = 0;
+        Set<Long> usedOrderIds = new HashSet<>();
+        
+        int minPrice = 10_000 + random.nextInt(100_000);
+        int maxPrice = minPrice + 100_000 + random.nextInt(900_000);
+        double midPrice = (minPrice + maxPrice) / 2.0;
+        double spread = (maxPrice - minPrice) * 0.1;
 
         for (int i = 0; i < numCommands; i++) {
             List<Order> all = new ArrayList<>(simBook.getBids());
@@ -45,19 +52,24 @@ public class OrderBookBenchmark {
 
             double prob = random.nextDouble();
             OrderBookCommand cmd;
-            if (prob < 0.83 || all.isEmpty()) {
+            if (prob < 0.75 || all.isEmpty()) {
                 Order.Side side = random.nextBoolean() ? Order.Side.BUY : Order.Side.SELL;
                 long price;
                 if ((side == Order.Side.BUY)) {
-                    price = nextSkewedValue(random, 1, 105, 105, 11.5);
+                    price = generateNormalInt(random, minPrice, maxPrice , midPrice - spread, (maxPrice - minPrice) /2.6 );
                 } else {
-                    price = nextSkewedValue(random, 95, 200, 95, 11.5);
+                    price = generateNormalInt(random, minPrice, maxPrice, midPrice + spread, (maxPrice - minPrice)/2.6 );
                 }
-                cmd = new OrderBookCommand.Add(nextOrderId++, side, price, nextValue(random, 1, 100));
+                long orderId;
+                do {
+                    orderId = Math.abs(random.nextLong());
+                } while (!usedOrderIds.add(orderId));
+                
+                cmd = new OrderBookCommand.Add(orderId, side, price, nextValue(random, 1, 100));
                 adds++;
-            } else if (prob < 0.95) {
+            } else if (prob < 0.85) {
                 Order target = all.get(random.nextInt(all.size()));
-                cmd = new OrderBookCommand.Modify(target.id(), nextValue(random, 1, 100), nextValue(random, 1, 100));
+                cmd = new OrderBookCommand.Modify(target.id(), nextValue(random, minPrice, maxPrice), nextValue(random, 1, 300));
                 modifies++;
             } else {
                 Order target = all.get(random.nextInt(all.size()));
@@ -68,31 +80,36 @@ public class OrderBookBenchmark {
             cmd.execute(simBook);
         }
 
-        System.out.printf("Generated %d commands: Adds=%d, Modifies=%d, Cancels=%d, Matches=%d, OrderBook-Size=%d/%d%n",
-            numCommands, adds, modifies, cancels, matchCounter.count,
-            simBook.getBids().size(), simBook.getAsks().size());
+//        System.out.printf("Generated %d commands: Adds=%d, Modifies=%d, Cancels=%d, Matches=%d, OrderBook-Size=%d/%d%n",
+//            numCommands, adds, modifies, cancels, matchCounter.count,
+//            simBook.getBids().size(), simBook.getAsks().size());
     }
 
     private long nextValue(Random random, int min, int max) {
         return min + random.nextInt(max - min + 1);
     }
 
-    private long nextSkewedValue(Random random, double low, double high, double mode, double skew) {
-        double u = random.nextDouble();
-        double val;
-        if (mode == high) {
-            val = high - (high - low) * Math.pow(u, skew);
-        } else if (mode == low) {
-            val = low + (high - low) * Math.pow(u, skew);
-        } else {
-            val = low + (high - low) * u;
-        }
-        return Math.round(val);
+
+    private int generateNormalInt(Random random, int min, int max, double mean, double stdDev) {
+        int result;
+        do {
+            double gaussian = random.nextGaussian();
+            result = (int) Math.round(mean + gaussian * stdDev);
+        } while (result < min || result > max);
+
+        return result;
     }
 
     @Setup(Level.Invocation)
     public void iterationSetup() {
         orderBook = new OrderBookImpl((mId, tId, p, q) -> {});
+    }
+
+    @TearDown(Level.Trial)
+    public void tearDown() {
+        if (affinityLock != null) {
+            affinityLock.release();
+        }
     }
 
     @Benchmark
@@ -104,7 +121,11 @@ public class OrderBookBenchmark {
 
     public static void main(String[] args) throws Exception {
         String libPath = extractProfiler();
-        
+
+//        OrderBookBenchmark benchmark = new OrderBookBenchmark();
+//        benchmark.setup();
+//        benchmark.iterationSetup();
+
         Options commandLineOptions = new CommandLineOptions(args);
         
         String profilerOptions = "libPath=" + libPath + ";output=text;dir=profiler-results";
@@ -113,6 +134,7 @@ public class OrderBookBenchmark {
             .parent(commandLineOptions)
             .include(OrderBookBenchmark.class.getSimpleName())
             .addProfiler(AsyncProfiler.class, profilerOptions)
+                .addProfiler("gc")
             .jvmArgs("--enable-native-access=ALL-UNNAMED", "--add-opens", "java.base/java.lang=ALL-UNNAMED")
             .build();
 

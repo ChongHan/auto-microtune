@@ -30,11 +30,22 @@ def main():
     # To be conservative, candidate is BETTER if it's strictly better than baseline
     # even when considering the candidate's error margin.
     # JMH's scoreError is a confidence interval radius.
-    # We consider it BETTER if candidate score plus error is less than or equal to baseline.
-    is_better = (c_s + c_e) <= b_s
-    
-    print(f"RESULT: {'BETTER' if is_better else 'WORSE'}")
-    sys.exit(0 if is_better else 1)
+    # We consider it BETTER if candidate score plus error is less than baseline 
+    # and candidate score is outside baseline error margin.
+    # We consider it WORSE if candidate score is greater than baseline plus baseline error.
+    # Otherwise, it's `SIMILAR` (within error margin).
+    if (c_s + c_e) < b_s and c_s < (b_s - b_e):
+        result = "BETTER"
+        exit_code = 0
+    elif c_s > (b_s + b_e):
+        result = "WORSE"
+        exit_code = 1
+    else:
+        result = "SIMILAR"
+        exit_code = 2
+
+    print(f"RESULT: {result}")
+    sys.exit(exit_code)
 
 if __name__ == "__main__":
     main()

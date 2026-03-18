@@ -96,7 +96,7 @@ class OrderBookPropertyTest {
     static class AddAction implements Action.Dependent<OrderBookState> {
         @Override
         public Arbitrary<Transformer<OrderBookState>> transformer(OrderBookState state) {
-            Arbitrary<Long> nextId = Arbitraries.longs().between(1, 1000).filter(id -> !state.getAllOrderIds().contains(id));
+            Arbitrary<Long> nextId = Arbitraries.longs().between(1, Long.MAX_VALUE).filter(id -> !state.getAllOrderIds().contains(id));
             Arbitrary<Order.Side> sides = Arbitraries.of(Order.Side.class);
             Arbitrary<Long> prices = Arbitraries.longs().between(1, 100);
             Arbitrary<Long> quantities = Arbitraries.longs().between(1, 1000);

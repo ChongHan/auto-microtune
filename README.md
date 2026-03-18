@@ -15,6 +15,12 @@ The repository is built around the "experiment loop" defined in `program.md`. Th
 
 The metric is **AverageTime** in microseconds (lower is better). Each experiment is logged to `results.tsv` to track the history of the optimization process.
 
+## Sample Run
+
+Branch `microtune/mar22` is a complete sample run of the loop: the branch-local [experiment summary](https://github.com/ChongHan/auto-microtune/blob/microtune/mar22/EXPERIMENT_SUMMARY.md) shows why alternating broad `tick` changes with local `tock` refinements works, because the big wins came from architecture changes while the last miles came from small map and bookkeeping improvements. It also shows the main risk of this style of optimization: the agent will learn the benchmark's exact workload and dataset shape, so the benchmark must be representative and the tests must be strong enough to reject “fast but wrong” designs.
+
+That run converged on an `OrderBook` design where orders live in primitive slot arrays, each price level is an intrusive FIFO queue, order lookup uses a specialized open-addressed intrusive map, and best-price selection uses a dense rebasing page directory with 64 prices per page tracked by a bitset. For example, a buy order at price `10_125` maps to page `10_125 >> 6` and bit offset `10_125 & 63`; finding the best bid means taking the highest non-empty page and then the highest active bit inside that page, while cancels and modifies still find the resting order directly by id through the intrusive map instead of scanning levels.
+
 ## Quick start
 
 **Requirements:** Java 21+, Gradle.
