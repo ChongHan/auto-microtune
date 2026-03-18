@@ -1,4 +1,4 @@
-# Autonomous Micro-Optimization Framework
+# Autonomous Micro-Benchmark-Optimization Framework
 
 This document defines the process for autonomous performance optimization of the `OrderBook` implementation.
 
@@ -8,32 +8,23 @@ To set up a new experiment, work with the user to:
 2. **Create the branch**: `git checkout -b microtune/<tag>` from current master.
 3. **Read the in-scope files**:
    - `src/main/java/com/xiaohanc/orderbook/OrderBookImpl.java` — the file you modify.
-   - `src/main/java/com/xiaohanc/orderbook/Order.java` — (Optional) additional file for modification.
+   - `src/main/java/com/xiaohanc/orderbook/Order.java`
    - `src/test/java/com/xiaohanc/orderbook/OrderBookBenchmark.java` — fixed JMH benchmark. Do not modify.
    - `src/test/java/com/xiaohanc/orderbook/OrderBookTest.java` — correctness tests. Read-only.
-4. **Initialize results.tsv**: Create `results.tsv` with just the header row: `commit	score	improvement	status	description`. The baseline will be recorded after the first run.
-5. **Confirm and go**: Confirm setup looks good. Once you get confirmation, kick off the experimentation.
-
-## Experimentation
-Each experiment runs a JMH benchmark for a fixed number of iterations. You launch it simply as: `./gradlew benchmark -PrunArgs="-rf json -rff candidate.json -wi 5 -i 5"`.
+4. **Initialize results.tsv**: Create `results.tsv` with just the header row: `commit	cycle	score	improvement	status	description`.
+5. **Establish Baseline**: Run the initial benchmark to establish a baseline: `./gradlew benchmark -PrunArgs="-rf json -rff baseline.json -wi 3 -i 5" > benchmark.log 2>&1`. Record the result in `results.tsv` with cycle as `baseline`.
+6. **Confirm and go**: Confirm setup looks good (check `benchmark.log` for any errors). Once you get confirmation, kick off the experimentation.
 
 **What you CAN do:**
-- Modify `OrderBookImpl.java` — everything is fair game: data structures, algorithms, inlining, etc.
+- Modify `OrderBookImpl.java` — everything is fair game: data structures, algorithms, vector API, etc.
 - You can add private helper methods or classes within the same package if needed.
-## Optimization Methodology
-The optimization process focuses on:
-- **Branch Prediction**: Minimize unpredictable branches. Prefer branchless code (e.g., bitwise operations) in performance-critical paths.
-- **Cache Locality**: Optimize for CPU caches. Use contiguous memory (arrays vs. linked structures), minimize pointer chasing, and maintain data proximity.
-- **Complexity Analysis**: Balance performance gains against implementation complexity. Simpler code is preferred unless a significant performance benefit is demonstrated.
 
 **What you CANNOT do:**
 - Modify `OrderBookBenchmark.java`. It is read-only and contains the fixed evaluation harness.
 - Modify `OrderBookTest.java` or other tests. Correctness must be preserved.
-- Install new packages or add dependencies to `build.gradle.kts`.
+- Optimize specifically against benchmark. Game on benchmark data.
 
 The primary objective is to minimize **AverageTime**. Implementations must pass all functional tests and maintain system stability.
-
-**Baseline**: The initial execution must establish a baseline performance metric: `./gradlew benchmark -PrunArgs="-rf json -rff baseline.json -wi 5 -i 5"`.
 
 ## Output format
 JMH produces a JSON report (`candidate.json`). You can use the provided script to compare scores:
@@ -45,47 +36,54 @@ The script will output:
 Baseline:  <score> ± <error>
 Candidate: <score> ± <error>
 Improvement: <percent>%
-RESULT: <BETTER/WORSE>
+RESULT: <BETTER/WORSE/SIMILAR>
 ```
 
 ## Logging results
 When an experiment is done, log it to `results.tsv` (tab-separated).
-The TSV has a header row and 5 columns:
+The TSV has a header row and 6 columns:
 ```
-commit	score	improvement	status	description
+commit	cycle	score	improvement	status	description
 ```
 1. git commit hash (short, 7 chars)
-2. score (AverageTime in microseconds)
-3. improvement (percentage relative to baseline)
-4. status: `keep`, `discard`, or `crash`
-5. short text description of what this experiment tried
+2. cycle: `tick` (Strategic exploration), `tock` (Tactical refinement) or `baseline`
+3. score (AverageTime in microseconds)
+4. improvement (percentage relative to baseline)
+5. status: `keep`, `discard`
+6. short text description of what this experiment tried.
 
 Example:
 ```
-commit	score	improvement	status	description
-a1b2c3d	6160893.243	0.00%	keep	baseline
-b2c3d4e	5950123.456	3.42%	keep	replace ArrayList with custom array
-c3d4e5f	6200000.000	-0.64%	discard	use TreeMap for bids/asks
+commit	cycle	score	improvement	status	description
+a1b2c3d	baseline	6160893.243	0.00%	keep	baseline
+b2c3d4e	tick	5950123.456	3.42%	keep	replace LinkedList with prmitive array
+c3d4e5f	tock	6200000.000	-0.64%	discard	use TreeMap for bids/asks because it is not cache friendly
+1111111	tick	6300000.000	-1.64%	discard	use primitive hashmap, worse result due to bad map implementation, worth exploring further
 ```
 
 ## The experiment loop
 The experiment runs on a dedicated branch (e.g. `microtune/mar17`).
-## Autonomous Execution Loop
-1. Observe the current git state (branch and commit).
-2. Implement a micro-optimization in `OrderBookImpl.java`.
-3. Execute functional tests: `./gradlew test`.
-4. If tests pass, commit the changes.
-5. Execute the benchmark: `./gradlew benchmark -PrunArgs="-rf json -rff candidate.json -wi 5 -i 5"`.
-6. Analyze results: `python3 compare_benchmarks.py baseline.json candidate.json replayOrders`.
-7. Record the performance data in `results.tsv` (untracked by git).
-8. If the candidate is BETTER, advance the branch by amending the commit message with the score and improvement percentage.
-   - `git commit --amend -m "$(git log -1 --pretty=%B) (Score: <score>, Improvement: <improvement>%)"`
-   - Update the baseline: `mv candidate.json baseline.json`
-9. If the candidate is WORSE, revert the changes (`git reset --hard HEAD~1`).
-10. If the build or tests fail, document the failure in `results.tsv`, revert, and proceed to the next iteration.
 
-The agent operates as an autonomous researcher. Successful iterations are integrated into the optimization branch, while unsuccessful ones are discarded. 
+### LOOP
+1. **Plan Current Iteration**:
+   - Look at the git state: the current branch/commit we're on and the history of changes.
+   - **Identify Cycle Type**: Alternate between 1 **Tick** and 1 **Tock**.
+   - **Tick (Strategic Exploration)**: Break free from the current design. Propose a fundamental shift in data structures or algorithms. There are always large gains to be had.
+   - **Tock (Tactical Refinement)**: Squeeze the performance out of the CURRENT architecture and refactor the code.
+   - NEVER optimise specifically on benchmark setup data, price/quantity/type distributions are dynamic in real world and can't be predicted. 
+2. **Implement**:Delegate the implementation to a dedicated subagent. (keep the context of the planning agent clean)
+3. **Test**: `./gradlew --stop > /dev/null 2>&1 && ./gradlew test > test.log 2>&1 && ./gradlew benchmark -PrunArgs="-rf json -rff candidate.json -wi 3 -i 5" > benchmark.log 2>&1 && python3 compare_benchmarks.py baseline.json candidate.json replayOrders`
+4. **Log Results**: Record the performance data and cycle type in `results.tsv`. If `discard` include a short summary of why. (NOTE: do not commit the `results.tsv` file).
+5. **Commit**: git commit regardless of the outcome.
+6. **Handle Results**:
+   - If the candidate is **BETTER**:
+     - Update the baseline: `mv candidate.json baseline.json`
+   - If the candidate is **WORSE**:
+     - Discard changes: `git revert HEAD --no-edit && rm -rf profiler-results test.log benchmark.log`. 
+   - If the candidate is **SIMILAR**:
+     - Decide based on code complexity or other factors:
+       - If keeping: Keep the commit and update the baseline: `mv candidate.json baseline.json`.
+       - If discarding: Discard changes: `git revert HEAD --no-edit && rm -rf profiler-results test.log`. 
+7. **Repeat**: back to step 1.
 
 **Error Handling**: If an iteration fails (e.g., due to a compilation error or test failure), evaluate the cause. Minor issues may be corrected; otherwise, the iteration should be logged as a failure and discarded.
-
-**Continuous Operation**: The execution loop should continue until manually terminated. The agent must proceed independently with new optimization hypotheses, leveraging performance profiles (e.g., `profiler-results/summary-cpu.txt`) to identify further opportunities.
