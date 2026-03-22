@@ -333,16 +333,22 @@ public class OrderBookImpl implements OrderBook {
 
         private void deleteIndex(int index) {
             int mask = values.length - 1;
-            values[index] = null;
             size--;
-
+            int gap = index;
             int next = (index + 1) & mask;
-            while (values[next] != null) {
-                long keyToRehash = keys[next];
-                Object valueToRehash = values[next];
-                values[next] = null;
-                size--;
-                reinsert(keyToRehash, valueToRehash);
+            while (true) {
+                Object value = values[next];
+                if (value == null) {
+                    values[gap] = null;
+                    return;
+                }
+
+                int home = mix(keys[next]) & mask;
+                if (((next - home) & mask) >= ((gap - home) & mask)) {
+                    keys[gap] = keys[next];
+                    values[gap] = value;
+                    gap = next;
+                }
                 next = (next + 1) & mask;
             }
         }
