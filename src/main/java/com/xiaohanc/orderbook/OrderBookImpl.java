@@ -11,7 +11,6 @@ public class OrderBookImpl implements OrderBook {
     private final SideBook asks = new SideBook(false);
     private final LongObjectMap<RestingOrder> orderById = new LongObjectMap<>();
     private final OrderMatchListener listener;
-    private RestingOrder freeOrders;
 
     public OrderBookImpl(OrderMatchListener listener) {
         this.listener = Objects.requireNonNull(listener);
@@ -30,7 +29,7 @@ public class OrderBookImpl implements OrderBook {
             level = book.addLevel(price);
         }
 
-        RestingOrder order = acquireOrder(id, side, price, remainingQuantity, level);
+        RestingOrder order = new RestingOrder(id, side, price, remainingQuantity, level);
         level.append(order);
         orderById.put(id, order);
     }
@@ -43,7 +42,6 @@ public class OrderBookImpl implements OrderBook {
         }
 
         removeOrder(order);
-        recycleOrder(order);
     }
 
     @Override
@@ -89,7 +87,6 @@ public class OrderBookImpl implements OrderBook {
                 if (maker.quantity == 0) {
                     orderById.remove(maker.id);
                     removeOrder(maker);
-                    recycleOrder(maker);
                 }
                 maker = nextMaker;
             }
@@ -110,30 +107,6 @@ public class OrderBookImpl implements OrderBook {
         if (level.isEmpty()) {
             level.book.removeLevel(level);
         }
-    }
-
-    private RestingOrder acquireOrder(long id, Order.Side side, long price, long quantity, PriceLevel level) {
-        RestingOrder order = freeOrders;
-        if (order == null) {
-            return new RestingOrder(id, side, price, quantity, level);
-        }
-
-        freeOrders = order.next;
-        order.id = id;
-        order.side = side;
-        order.price = price;
-        order.quantity = quantity;
-        order.level = level;
-        order.prev = null;
-        order.next = null;
-        return order;
-    }
-
-    private void recycleOrder(RestingOrder order) {
-        order.prev = null;
-        order.level = null;
-        order.next = freeOrders;
-        freeOrders = order;
     }
 
     private List<Order> snapshot(SideBook book) {
@@ -475,11 +448,11 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private static final class RestingOrder {
-        private long id;
-        private Order.Side side;
-        private long price;
+        private final long id;
+        private final Order.Side side;
+        private final long price;
         private long quantity;
-        private PriceLevel level;
+        private final PriceLevel level;
         private RestingOrder prev;
         private RestingOrder next;
 
