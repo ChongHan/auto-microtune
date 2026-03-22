@@ -9,7 +9,7 @@ import java.util.Objects;
 public class OrderBookImpl implements OrderBook {
     private final SideBook bids = new SideBook(true);
     private final SideBook asks = new SideBook(false);
-    private final LongObjectMap<RestingOrder> orderById = new LongObjectMap<>(4096, 0.5f);
+    private final LongObjectMap<RestingOrder> orderById = new LongObjectMap<>(4096);
     private final OrderMatchListener listener;
 
     public OrderBookImpl(OrderMatchListener listener) {
@@ -245,30 +245,25 @@ public class OrderBookImpl implements OrderBook {
 
     private static final class LongObjectMap<V> {
         private static final int DEFAULT_CAPACITY = 16;
+        private static final float LOAD_FACTOR = 0.6f;
 
         private long[] keys;
         private Object[] values;
         private int size;
-        private final float loadFactor;
         private int resizeThreshold;
 
         private LongObjectMap() {
-            this(DEFAULT_CAPACITY, 0.6f);
+            this(DEFAULT_CAPACITY);
         }
 
         private LongObjectMap(int capacity) {
-            this(capacity, 0.6f);
-        }
-
-        private LongObjectMap(int capacity, float loadFactor) {
             int actualCapacity = 1;
             while (actualCapacity < capacity) {
                 actualCapacity <<= 1;
             }
-            this.loadFactor = loadFactor;
             keys = new long[actualCapacity];
             values = new Object[actualCapacity];
-            resizeThreshold = (int) (actualCapacity * loadFactor);
+            resizeThreshold = (int) (actualCapacity * LOAD_FACTOR);
         }
 
         private V get(long key) {
@@ -366,7 +361,7 @@ public class OrderBookImpl implements OrderBook {
             Object[] oldValues = values;
             keys = new long[oldKeys.length << 1];
             values = new Object[oldValues.length << 1];
-            resizeThreshold = (int) (values.length * loadFactor);
+            resizeThreshold = (int) (values.length * LOAD_FACTOR);
 
             int oldSize = size;
             size = 0;
