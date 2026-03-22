@@ -9,7 +9,7 @@ import java.util.Objects;
 public class OrderBookImpl implements OrderBook {
     private final SideBook bids = new SideBook(true);
     private final SideBook asks = new SideBook(false);
-    private final LongObjectMap<RestingOrder> orderById = new LongObjectMap<>();
+    private final LongObjectMap<RestingOrder> orderById = new LongObjectMap<>(4096);
     private final OrderMatchListener listener;
 
     public OrderBookImpl(OrderMatchListener listener) {
@@ -121,11 +121,11 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private static final class SideBook {
-        private static final int INITIAL_HEAP_CAPACITY = 16;
+        private static final int INITIAL_HEAP_CAPACITY = 256;
         private static final int HEAP_ARITY = 4;
 
         private final boolean buySide;
-        private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>();
+        private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>(256);
         private PriceLevel[] heap = new PriceLevel[INITIAL_HEAP_CAPACITY];
         private int heapSize;
 
