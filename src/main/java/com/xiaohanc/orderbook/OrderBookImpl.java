@@ -125,7 +125,7 @@ public class OrderBookImpl implements OrderBook {
         private static final int HEAP_ARITY = 4;
 
         private final boolean buySide;
-        private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>(256);
+        private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>(256, 0.5f);
         private PriceLevel[] heap = new PriceLevel[INITIAL_HEAP_CAPACITY];
         private int heapSize;
 
@@ -245,25 +245,30 @@ public class OrderBookImpl implements OrderBook {
 
     private static final class LongObjectMap<V> {
         private static final int DEFAULT_CAPACITY = 16;
-        private static final float LOAD_FACTOR = 0.6f;
 
         private long[] keys;
         private Object[] values;
         private int size;
+        private final float loadFactor;
         private int resizeThreshold;
 
         private LongObjectMap() {
-            this(DEFAULT_CAPACITY);
+            this(DEFAULT_CAPACITY, 0.6f);
         }
 
         private LongObjectMap(int capacity) {
+            this(capacity, 0.6f);
+        }
+
+        private LongObjectMap(int capacity, float loadFactor) {
             int actualCapacity = 1;
             while (actualCapacity < capacity) {
                 actualCapacity <<= 1;
             }
+            this.loadFactor = loadFactor;
             keys = new long[actualCapacity];
             values = new Object[actualCapacity];
-            resizeThreshold = (int) (actualCapacity * LOAD_FACTOR);
+            resizeThreshold = (int) (actualCapacity * loadFactor);
         }
 
         private V get(long key) {
@@ -361,7 +366,7 @@ public class OrderBookImpl implements OrderBook {
             Object[] oldValues = values;
             keys = new long[oldKeys.length << 1];
             values = new Object[oldValues.length << 1];
-            resizeThreshold = (int) (values.length * LOAD_FACTOR);
+            resizeThreshold = (int) (values.length * loadFactor);
 
             int oldSize = size;
             size = 0;
