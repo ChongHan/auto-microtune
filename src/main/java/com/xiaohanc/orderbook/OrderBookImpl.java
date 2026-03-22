@@ -18,11 +18,20 @@ public class OrderBookImpl implements OrderBook {
 
     @Override
     public void addOrder(long id, Order.Side side, long price, long quantity) {
-        if (side == Order.Side.BUY) {
-            addBuyOrder(id, price, quantity);
-        } else {
-            addSellOrder(id, price, quantity);
+        long remainingQuantity = matchOrder(id, side, price, quantity);
+        if (remainingQuantity == 0) {
+            return;
         }
+
+        SideBook book = side == Order.Side.BUY ? bids : asks;
+        PriceLevel level = book.level(price);
+        if (level == null) {
+            level = book.addLevel(price);
+        }
+
+        RestingOrder order = new RestingOrder(id, side, price, remainingQuantity, level);
+        level.append(order);
+        orderById.put(id, order);
     }
 
     @Override
@@ -57,44 +66,13 @@ public class OrderBookImpl implements OrderBook {
         return snapshot(asks);
     }
 
-    private void addBuyOrder(long id, long price, long quantity) {
-        long remainingQuantity = matchBuyOrder(id, price, quantity);
-        if (remainingQuantity == 0) {
-            return;
-        }
-
-        PriceLevel level = bids.level(price);
-        if (level == null) {
-            level = bids.addLevel(price);
-        }
-
-        RestingOrder order = new RestingOrder(id, Order.Side.BUY, price, remainingQuantity, level);
-        level.append(order);
-        orderById.put(id, order);
-    }
-
-    private void addSellOrder(long id, long price, long quantity) {
-        long remainingQuantity = matchSellOrder(id, price, quantity);
-        if (remainingQuantity == 0) {
-            return;
-        }
-
-        PriceLevel level = asks.level(price);
-        if (level == null) {
-            level = asks.addLevel(price);
-        }
-
-        RestingOrder order = new RestingOrder(id, Order.Side.SELL, price, remainingQuantity, level);
-        level.append(order);
-        orderById.put(id, order);
-    }
-
-    private long matchBuyOrder(long incomingId, long incomingPrice, long incomingQuantity) {
+    private long matchOrder(long incomingId, Order.Side incomingSide, long incomingPrice, long incomingQuantity) {
+        SideBook oppositeBook = incomingSide == Order.Side.BUY ? asks : bids;
         long remainingQuantity = incomingQuantity;
 
         while (remainingQuantity > 0) {
-            PriceLevel level = asks.best();
-            if (level == null || incomingPrice < level.price) {
+            PriceLevel level = oppositeBook.best();
+            if (level == null || !crosses(incomingSide, incomingPrice, level.price)) {
                 break;
             }
 
@@ -117,32 +95,10 @@ public class OrderBookImpl implements OrderBook {
         return remainingQuantity;
     }
 
-    private long matchSellOrder(long incomingId, long incomingPrice, long incomingQuantity) {
-        long remainingQuantity = incomingQuantity;
-
-        while (remainingQuantity > 0) {
-            PriceLevel level = bids.best();
-            if (level == null || incomingPrice > level.price) {
-                break;
-            }
-
-            RestingOrder maker = level.head;
-            while (maker != null && remainingQuantity > 0) {
-                RestingOrder nextMaker = maker.next;
-                long matchedQuantity = Math.min(remainingQuantity, maker.quantity);
-                listener.onMatch(maker.id, incomingId, maker.price, matchedQuantity);
-
-                remainingQuantity -= matchedQuantity;
-                maker.quantity -= matchedQuantity;
-                if (maker.quantity == 0) {
-                    orderById.remove(maker.id);
-                    removeOrder(maker);
-                }
-                maker = nextMaker;
-            }
-        }
-
-        return remainingQuantity;
+    private boolean crosses(Order.Side incomingSide, long incomingPrice, long restingPrice) {
+        return incomingSide == Order.Side.BUY
+                ? incomingPrice >= restingPrice
+                : incomingPrice <= restingPrice;
     }
 
     private void removeOrder(RestingOrder order) {
