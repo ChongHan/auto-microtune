@@ -11,8 +11,8 @@ import java.util.Objects;
 import java.util.TreeMap;
 
 public class OrderBookImpl implements OrderBook {
-    private final NavigableMap<Long, PriceLevel> bids = new TreeMap<>(Collections.reverseOrder());
-    private final NavigableMap<Long, PriceLevel> asks = new TreeMap<>();
+    private final SideBook bids = new SideBook(true);
+    private final SideBook asks = new SideBook(false);
     private final Map<Long, RestingOrder> orderById = new HashMap<>();
     private final OrderMatchListener listener;
 
@@ -27,8 +27,11 @@ public class OrderBookImpl implements OrderBook {
             return;
         }
 
-        NavigableMap<Long, PriceLevel> book = side == Order.Side.BUY ? bids : asks;
-        PriceLevel level = book.computeIfAbsent(price, PriceLevel::new);
+        SideBook book = side == Order.Side.BUY ? bids : asks;
+        PriceLevel level = book.level(price);
+        if (level == null) {
+            level = book.addLevel(price);
+        }
         RestingOrder order = new RestingOrder(id, side, price, remainingQuantity, level);
         level.append(order);
         orderById.put(id, order);
@@ -58,25 +61,24 @@ public class OrderBookImpl implements OrderBook {
 
     @Override
     public List<Order> getBids() {
-        return snapshot(bids);
+        return snapshot(bids.levels);
     }
 
     @Override
     public List<Order> getAsks() {
-        return snapshot(asks);
+        return snapshot(asks.levels);
     }
 
     private long matchOrder(long incomingId, Order.Side incomingSide, long incomingPrice, long incomingQuantity) {
-        NavigableMap<Long, PriceLevel> oppositeBook = incomingSide == Order.Side.BUY ? asks : bids;
+        SideBook oppositeBook = incomingSide == Order.Side.BUY ? asks : bids;
         long remainingQuantity = incomingQuantity;
 
         while (remainingQuantity > 0) {
-            Map.Entry<Long, PriceLevel> bestEntry = oppositeBook.firstEntry();
-            if (bestEntry == null || !crosses(incomingSide, incomingPrice, bestEntry.getKey())) {
+            PriceLevel level = oppositeBook.best;
+            if (level == null || !crosses(incomingSide, incomingPrice, level.price)) {
                 break;
             }
 
-            PriceLevel level = bestEntry.getValue();
             RestingOrder maker = level.head;
             while (maker != null && remainingQuantity > 0) {
                 RestingOrder nextMaker = maker.next;
@@ -106,8 +108,7 @@ public class OrderBookImpl implements OrderBook {
         PriceLevel level = order.level;
         level.unlink(order);
         if (level.isEmpty()) {
-            NavigableMap<Long, PriceLevel> book = order.side == Order.Side.BUY ? bids : asks;
-            book.remove(level.price);
+            level.book.removeLevel(level);
         }
     }
 
@@ -122,11 +123,15 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private static final class PriceLevel {
+        private final SideBook book;
         private final long price;
         private RestingOrder head;
         private RestingOrder tail;
+        private PriceLevel better;
+        private PriceLevel worse;
 
-        private PriceLevel(long price) {
+        private PriceLevel(SideBook book, long price) {
+            this.book = book;
             this.price = price;
         }
 
@@ -161,6 +166,60 @@ public class OrderBookImpl implements OrderBook {
 
         private boolean isEmpty() {
             return head == null;
+        }
+    }
+
+    private static final class SideBook {
+        private final NavigableMap<Long, PriceLevel> levels;
+        private final boolean buySide;
+        private PriceLevel best;
+
+        private SideBook(boolean buySide) {
+            this.buySide = buySide;
+            this.levels = buySide ? new TreeMap<>(Collections.reverseOrder()) : new TreeMap<>();
+        }
+
+        private PriceLevel level(long price) {
+            return levels.get(price);
+        }
+
+        private PriceLevel addLevel(long price) {
+            PriceLevel level = new PriceLevel(this, price);
+            Map.Entry<Long, PriceLevel> betterEntry = buySide ? levels.lowerEntry(price) : levels.lowerEntry(price);
+            Map.Entry<Long, PriceLevel> worseEntry = buySide ? levels.higherEntry(price) : levels.higherEntry(price);
+            PriceLevel better = betterEntry == null ? null : betterEntry.getValue();
+            PriceLevel worse = worseEntry == null ? null : worseEntry.getValue();
+
+            level.better = better;
+            level.worse = worse;
+            if (better == null) {
+                best = level;
+            } else {
+                better.worse = level;
+            }
+            if (worse != null) {
+                worse.better = level;
+            }
+
+            levels.put(price, level);
+            return level;
+        }
+
+        private void removeLevel(PriceLevel level) {
+            PriceLevel better = level.better;
+            PriceLevel worse = level.worse;
+            if (better == null) {
+                best = worse;
+            } else {
+                better.worse = worse;
+            }
+            if (worse != null) {
+                worse.better = better;
+            }
+
+            level.better = null;
+            level.worse = null;
+            levels.remove(level.price);
         }
     }
 
