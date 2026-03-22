@@ -146,19 +146,12 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private PriceLevel best() {
-            while (heapSize > 0) {
-                PriceLevel level = heap[0];
-                if (level.active) {
-                    return level;
-                }
-                discardBest();
-            }
-            return null;
+            return heapSize == 0 ? null : heap[0];
         }
 
         private void removeLevel(PriceLevel level) {
-            level.active = false;
             levels.remove(level.price);
+            removeAt(level.heapIndex);
         }
 
         private List<PriceLevel> snapshotLevels() {
@@ -177,15 +170,27 @@ public class OrderBookImpl implements OrderBook {
             }
 
             heap[heapSize] = level;
+            level.heapIndex = heapSize;
             siftUp(heapSize++);
         }
 
-        private void discardBest() {
+        private void removeAt(int index) {
             int lastIndex = --heapSize;
-            heap[0] = heap[lastIndex];
+            PriceLevel removed = heap[index];
+            PriceLevel replacement = heap[lastIndex];
             heap[lastIndex] = null;
-            if (heapSize > 0) {
-                siftDown(0);
+            removed.heapIndex = -1;
+
+            if (index == lastIndex) {
+                return;
+            }
+
+            heap[index] = replacement;
+            replacement.heapIndex = index;
+            if (index > 0 && better(heap[index], heap[(index - 1) >>> 1])) {
+                siftUp(index);
+            } else {
+                siftDown(index);
             }
         }
 
@@ -227,16 +232,19 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private void swap(int left, int right) {
-            PriceLevel level = heap[left];
-            heap[left] = heap[right];
-            heap[right] = level;
+            PriceLevel leftLevel = heap[left];
+            PriceLevel rightLevel = heap[right];
+            heap[left] = rightLevel;
+            heap[right] = leftLevel;
+            leftLevel.heapIndex = right;
+            rightLevel.heapIndex = left;
         }
     }
 
     private static final class PriceLevel {
         private final SideBook book;
         private final long price;
-        private boolean active = true;
+        private int heapIndex = -1;
         private RestingOrder head;
         private RestingOrder tail;
 
