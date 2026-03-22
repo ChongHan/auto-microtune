@@ -123,9 +123,12 @@ public class OrderBookImpl implements OrderBook {
     private static final class SideBook {
         private static final int INITIAL_HEAP_CAPACITY = 256;
         private static final int HEAP_ARITY = 4;
+        private static final int LEVEL_CACHE_SIZE = 8;
 
         private final boolean buySide;
         private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>(256);
+        private final long[] cachedPrices = new long[LEVEL_CACHE_SIZE];
+        private final PriceLevel[] cachedLevels = new PriceLevel[LEVEL_CACHE_SIZE];
         private PriceLevel[] heap = new PriceLevel[INITIAL_HEAP_CAPACITY];
         private int heapSize;
 
@@ -134,12 +137,26 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private PriceLevel level(long price) {
-            return levels.get(price);
+            int cacheSlot = cacheSlot(price);
+            PriceLevel cachedLevel = cachedLevels[cacheSlot];
+            if (cachedLevel != null && cachedPrices[cacheSlot] == price) {
+                return cachedLevel;
+            }
+
+            PriceLevel level = levels.get(price);
+            if (level != null) {
+                cachedPrices[cacheSlot] = price;
+                cachedLevels[cacheSlot] = level;
+            }
+            return level;
         }
 
         private PriceLevel addLevel(long price) {
             PriceLevel level = new PriceLevel(this, price);
             levels.put(price, level);
+            int cacheSlot = cacheSlot(price);
+            cachedPrices[cacheSlot] = price;
+            cachedLevels[cacheSlot] = level;
             push(level);
             return level;
         }
@@ -150,6 +167,10 @@ public class OrderBookImpl implements OrderBook {
 
         private void removeLevel(PriceLevel level) {
             levels.remove(level.price);
+            int cacheSlot = cacheSlot(level.price);
+            if (cachedLevels[cacheSlot] == level) {
+                cachedLevels[cacheSlot] = null;
+            }
             removeAt(level.heapIndex);
         }
 
@@ -240,6 +261,10 @@ public class OrderBookImpl implements OrderBook {
             heap[right] = leftLevel;
             leftLevel.heapIndex = right;
             rightLevel.heapIndex = left;
+        }
+
+        private int cacheSlot(long price) {
+            return ((int) price ^ (int) (price >>> 32)) & (LEVEL_CACHE_SIZE - 1);
         }
     }
 
