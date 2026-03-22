@@ -245,7 +245,7 @@ public class OrderBookImpl implements OrderBook {
 
     private static final class LongObjectMap<V> {
         private static final int DEFAULT_CAPACITY = 16;
-        private static final float LOAD_FACTOR = 0.6f;
+        private static final float LOAD_FACTOR = 0.7f;
 
         private long[] keys;
         private Object[] values;
