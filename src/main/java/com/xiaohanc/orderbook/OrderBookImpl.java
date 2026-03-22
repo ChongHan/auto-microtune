@@ -105,7 +105,7 @@ public class OrderBookImpl implements OrderBook {
         PriceLevel level = order.level;
         level.unlink(order);
         if (level.isEmpty()) {
-            level.block.book.removeLevel(level);
+            level.book.removeLevel(level);
         }
     }
 
@@ -122,13 +122,10 @@ public class OrderBookImpl implements OrderBook {
 
     private static final class SideBook {
         private static final int INITIAL_HEAP_CAPACITY = 16;
-        private static final int BLOCK_SHIFT = 6;
-        private static final int BLOCK_SIZE = 1 << BLOCK_SHIFT;
-        private static final int BLOCK_MASK = BLOCK_SIZE - 1;
 
         private final boolean buySide;
-        private final LongObjectMap<PriceBlock> blocks = new LongObjectMap<>();
-        private PriceBlock[] heap = new PriceBlock[INITIAL_HEAP_CAPACITY];
+        private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>();
+        private PriceLevel[] heap = new PriceLevel[INITIAL_HEAP_CAPACITY];
         private int heapSize;
 
         private SideBook(boolean buySide) {
@@ -136,83 +133,50 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private PriceLevel level(long price) {
-            PriceBlock block = blocks.get(blockKey(price));
-            return block == null ? null : block.levels[levelIndex(price)];
+            return levels.get(price);
         }
 
         private PriceLevel addLevel(long price) {
-            long blockKey = blockKey(price);
-            PriceBlock block = blocks.get(blockKey);
-            if (block == null) {
-                block = new PriceBlock(this, blockKey);
-                blocks.put(blockKey, block);
-                push(block);
-            }
-
-            int levelIndex = levelIndex(price);
-            PriceLevel level = new PriceLevel(block, price);
-            block.levels[levelIndex] = level;
-            block.occupiedMask |= 1L << levelIndex;
+            PriceLevel level = new PriceLevel(this, price);
+            levels.put(price, level);
+            push(level);
             return level;
         }
 
         private PriceLevel best() {
-            if (heapSize == 0) {
-                return null;
-            }
-
-            PriceBlock block = heap[0];
-            int levelIndex = buySide
-                    ? 63 - Long.numberOfLeadingZeros(block.occupiedMask)
-                    : Long.numberOfTrailingZeros(block.occupiedMask);
-            return block.levels[levelIndex];
+            return heapSize == 0 ? null : heap[0];
         }
 
         private void removeLevel(PriceLevel level) {
-            PriceBlock block = level.block;
-            int levelIndex = levelIndex(level.price);
-            block.levels[levelIndex] = null;
-            block.occupiedMask &= ~(1L << levelIndex);
-            if (block.occupiedMask == 0) {
-                blocks.remove(block.blockKey);
-                removeAt(block.heapIndex);
-            }
+            levels.remove(level.price);
+            removeAt(level.heapIndex);
         }
 
         private List<PriceLevel> snapshotLevels() {
-            List<PriceBlock> blockSnapshot = new ArrayList<>(blocks.size());
-            blocks.addValuesTo(blockSnapshot);
-            List<PriceLevel> levels = new ArrayList<>(blockSnapshot.size() * 4);
-            for (PriceBlock block : blockSnapshot) {
-                long occupiedMask = block.occupiedMask;
-                while (occupiedMask != 0) {
-                    int levelIndex = Long.numberOfTrailingZeros(occupiedMask);
-                    levels.add(block.levels[levelIndex]);
-                    occupiedMask &= occupiedMask - 1;
-                }
-            }
-            levels.sort((left, right) -> buySide
+            List<PriceLevel> orderedLevels = new ArrayList<>(levels.size());
+            levels.addValuesTo(orderedLevels);
+            orderedLevels.sort((left, right) -> buySide
                     ? Long.compare(right.price, left.price)
                     : Long.compare(left.price, right.price));
-            return levels;
+            return orderedLevels;
         }
 
-        private void push(PriceBlock block) {
+        private void push(PriceLevel level) {
             if (heapSize == heap.length) {
-                PriceBlock[] expanded = new PriceBlock[heap.length << 1];
+                PriceLevel[] expanded = new PriceLevel[heap.length << 1];
                 System.arraycopy(heap, 0, expanded, 0, heap.length);
                 heap = expanded;
             }
 
-            heap[heapSize] = block;
-            block.heapIndex = heapSize;
+            heap[heapSize] = level;
+            level.heapIndex = heapSize;
             siftUp(heapSize++);
         }
 
         private void removeAt(int index) {
             int lastIndex = --heapSize;
-            PriceBlock removed = heap[index];
-            PriceBlock replacement = heap[lastIndex];
+            PriceLevel removed = heap[index];
+            PriceLevel replacement = heap[lastIndex];
             heap[lastIndex] = null;
             removed.heapIndex = -1;
 
@@ -262,25 +226,17 @@ public class OrderBookImpl implements OrderBook {
             }
         }
 
-        private boolean better(PriceBlock left, PriceBlock right) {
-            return buySide ? left.blockKey > right.blockKey : left.blockKey < right.blockKey;
+        private boolean better(PriceLevel left, PriceLevel right) {
+            return buySide ? left.price > right.price : left.price < right.price;
         }
 
         private void swap(int left, int right) {
-            PriceBlock leftBlock = heap[left];
-            PriceBlock rightBlock = heap[right];
-            heap[left] = rightBlock;
-            heap[right] = leftBlock;
-            leftBlock.heapIndex = right;
-            rightBlock.heapIndex = left;
-        }
-
-        private long blockKey(long price) {
-            return price >> BLOCK_SHIFT;
-        }
-
-        private int levelIndex(long price) {
-            return (int) (price & BLOCK_MASK);
+            PriceLevel leftLevel = heap[left];
+            PriceLevel rightLevel = heap[right];
+            heap[left] = rightLevel;
+            heap[right] = leftLevel;
+            leftLevel.heapIndex = right;
+            rightLevel.heapIndex = left;
         }
     }
 
@@ -442,27 +398,15 @@ public class OrderBookImpl implements OrderBook {
         }
     }
 
-    private static final class PriceBlock {
-        private final SideBook book;
-        private final long blockKey;
-        private final PriceLevel[] levels = new PriceLevel[SideBook.BLOCK_SIZE];
-        private long occupiedMask;
-        private int heapIndex = -1;
-
-        private PriceBlock(SideBook book, long blockKey) {
-            this.book = book;
-            this.blockKey = blockKey;
-        }
-    }
-
     private static final class PriceLevel {
-        private final PriceBlock block;
+        private final SideBook book;
         private final long price;
+        private int heapIndex = -1;
         private RestingOrder head;
         private RestingOrder tail;
 
-        private PriceLevel(PriceBlock block, long price) {
-            this.block = block;
+        private PriceLevel(SideBook book, long price) {
+            this.book = book;
             this.price = price;
         }
 
