@@ -123,9 +123,12 @@ public class OrderBookImpl implements OrderBook {
     private static final class SideBook {
         private static final int INITIAL_HEAP_CAPACITY = 256;
         private static final int HEAP_ARITY = 4;
+        private static final int PRICE_PAGE_SHIFT = 6;
+        private static final int PRICE_PAGE_SIZE = 1 << PRICE_PAGE_SHIFT;
+        private static final int PRICE_PAGE_MASK = PRICE_PAGE_SIZE - 1;
 
         private final boolean buySide;
-        private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>(256, 0.5f);
+        private final LongObjectMap<PricePage> pages = new LongObjectMap<>(64, 0.5f);
         private PriceLevel[] heap = new PriceLevel[INITIAL_HEAP_CAPACITY];
         private int heapSize;
 
@@ -134,12 +137,21 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private PriceLevel level(long price) {
-            return levels.get(price);
+            PricePage page = pages.get(pageKey(price));
+            return page == null ? null : page.levels[pageSlot(price)];
         }
 
         private PriceLevel addLevel(long price) {
+            long pageKey = pageKey(price);
+            PricePage page = pages.get(pageKey);
+            if (page == null) {
+                page = new PricePage();
+                pages.put(pageKey, page);
+            }
+
             PriceLevel level = new PriceLevel(this, price);
-            levels.put(price, level);
+            page.levels[pageSlot(price)] = level;
+            page.size++;
             push(level);
             return level;
         }
@@ -149,13 +161,27 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private void removeLevel(PriceLevel level) {
-            levels.remove(level.price);
+            long pageKey = pageKey(level.price);
+            PricePage page = pages.get(pageKey);
+            int slot = pageSlot(level.price);
+            page.levels[slot] = null;
+            if (--page.size == 0) {
+                pages.remove(pageKey);
+            }
             removeAt(level.heapIndex);
         }
 
         private List<PriceLevel> snapshotLevels() {
-            List<PriceLevel> orderedLevels = new ArrayList<>(levels.size());
-            levels.addValuesTo(orderedLevels);
+            List<PricePage> pageList = new ArrayList<>(pages.size());
+            pages.addValuesTo(pageList);
+            List<PriceLevel> orderedLevels = new ArrayList<>(heapSize);
+            for (PricePage page : pageList) {
+                for (PriceLevel level : page.levels) {
+                    if (level != null) {
+                        orderedLevels.add(level);
+                    }
+                }
+            }
             orderedLevels.sort((left, right) -> buySide
                     ? Long.compare(right.price, left.price)
                     : Long.compare(left.price, right.price));
@@ -241,6 +267,19 @@ public class OrderBookImpl implements OrderBook {
             leftLevel.heapIndex = right;
             rightLevel.heapIndex = left;
         }
+
+        private long pageKey(long price) {
+            return price >> PRICE_PAGE_SHIFT;
+        }
+
+        private int pageSlot(long price) {
+            return (int) (price & PRICE_PAGE_MASK);
+        }
+    }
+
+    private static final class PricePage {
+        private final PriceLevel[] levels = new PriceLevel[SideBook.PRICE_PAGE_SIZE];
+        private int size;
     }
 
     private static final class LongObjectMap<V> {
