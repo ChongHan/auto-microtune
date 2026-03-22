@@ -2,16 +2,14 @@ package com.xiaohanc.orderbook;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 
 public class OrderBookImpl implements OrderBook {
     private final SideBook bids = new SideBook(true);
     private final SideBook asks = new SideBook(false);
-    private final Map<Long, RestingOrder> orderById = new HashMap<>();
+    private final LongObjectMap<RestingOrder> orderById = new LongObjectMap<>();
     private final OrderMatchListener listener;
 
     public OrderBookImpl(OrderMatchListener listener) {
@@ -126,7 +124,7 @@ public class OrderBookImpl implements OrderBook {
         private static final int INITIAL_HEAP_CAPACITY = 16;
 
         private final boolean buySide;
-        private final Map<Long, PriceLevel> levels = new HashMap<>();
+        private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>();
         private PriceLevel[] heap = new PriceLevel[INITIAL_HEAP_CAPACITY];
         private int heapSize;
 
@@ -155,7 +153,8 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private List<PriceLevel> snapshotLevels() {
-            List<PriceLevel> orderedLevels = new ArrayList<>(levels.values());
+            List<PriceLevel> orderedLevels = new ArrayList<>(levels.size());
+            levels.addValuesTo(orderedLevels);
             orderedLevels.sort((left, right) -> buySide
                     ? Long.compare(right.price, left.price)
                     : Long.compare(left.price, right.price));
@@ -238,6 +237,158 @@ public class OrderBookImpl implements OrderBook {
             heap[right] = leftLevel;
             leftLevel.heapIndex = right;
             rightLevel.heapIndex = left;
+        }
+    }
+
+    private static final class LongObjectMap<V> {
+        private static final int DEFAULT_CAPACITY = 16;
+        private static final float LOAD_FACTOR = 0.6f;
+
+        private long[] keys;
+        private Object[] values;
+        private int size;
+        private int resizeThreshold;
+
+        private LongObjectMap() {
+            this(DEFAULT_CAPACITY);
+        }
+
+        private LongObjectMap(int capacity) {
+            int actualCapacity = 1;
+            while (actualCapacity < capacity) {
+                actualCapacity <<= 1;
+            }
+            keys = new long[actualCapacity];
+            values = new Object[actualCapacity];
+            resizeThreshold = (int) (actualCapacity * LOAD_FACTOR);
+        }
+
+        private V get(long key) {
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
+            while (true) {
+                Object value = values[index];
+                if (value == null) {
+                    return null;
+                }
+                if (keys[index] == key) {
+                    return valueAt(index);
+                }
+                index = (index + 1) & mask;
+            }
+        }
+
+        private V put(long key, V value) {
+            if (size >= resizeThreshold) {
+                resize();
+            }
+
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
+            while (true) {
+                Object current = values[index];
+                if (current == null) {
+                    keys[index] = key;
+                    values[index] = value;
+                    size++;
+                    return null;
+                }
+                if (keys[index] == key) {
+                    V previous = valueAt(index);
+                    values[index] = value;
+                    return previous;
+                }
+                index = (index + 1) & mask;
+            }
+        }
+
+        private V remove(long key) {
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
+            while (true) {
+                Object current = values[index];
+                if (current == null) {
+                    return null;
+                }
+                if (keys[index] == key) {
+                    V removed = valueAt(index);
+                    deleteIndex(index);
+                    return removed;
+                }
+                index = (index + 1) & mask;
+            }
+        }
+
+        private int size() {
+            return size;
+        }
+
+        private void addValuesTo(List<V> out) {
+            for (Object value : values) {
+                if (value != null) {
+                    out.add(cast(value));
+                }
+            }
+        }
+
+        private void deleteIndex(int index) {
+            int mask = values.length - 1;
+            values[index] = null;
+            size--;
+
+            int next = (index + 1) & mask;
+            while (values[next] != null) {
+                long keyToRehash = keys[next];
+                Object valueToRehash = values[next];
+                values[next] = null;
+                size--;
+                reinsert(keyToRehash, valueToRehash);
+                next = (next + 1) & mask;
+            }
+        }
+
+        private void resize() {
+            long[] oldKeys = keys;
+            Object[] oldValues = values;
+            keys = new long[oldKeys.length << 1];
+            values = new Object[oldValues.length << 1];
+            resizeThreshold = (int) (values.length * LOAD_FACTOR);
+
+            int oldSize = size;
+            size = 0;
+            for (int i = 0; i < oldValues.length; i++) {
+                Object value = oldValues[i];
+                if (value != null) {
+                    reinsert(oldKeys[i], value);
+                }
+            }
+            size = oldSize;
+        }
+
+        private void reinsert(long key, Object value) {
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
+            while (values[index] != null) {
+                index = (index + 1) & mask;
+            }
+            keys[index] = key;
+            values[index] = value;
+            size++;
+        }
+
+        private int mix(long key) {
+            long mixed = key * -7046029254386353131L;
+            return (int) (mixed ^ (mixed >>> 32));
+        }
+
+        @SuppressWarnings("unchecked")
+        private V valueAt(int index) {
+            return (V) values[index];
+        }
+
+        @SuppressWarnings("unchecked")
+        private V cast(Object value) {
+            return (V) value;
         }
     }
 
