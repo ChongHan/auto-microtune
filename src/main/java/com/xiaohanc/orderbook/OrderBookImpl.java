@@ -122,6 +122,7 @@ public class OrderBookImpl implements OrderBook {
 
     private static final class SideBook {
         private static final int INITIAL_HEAP_CAPACITY = 16;
+        private static final int HEAP_ARITY = 4;
 
         private final boolean buySide;
         private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>();
@@ -186,7 +187,7 @@ public class OrderBookImpl implements OrderBook {
 
             heap[index] = replacement;
             replacement.heapIndex = index;
-            if (index > 0 && better(heap[index], heap[(index - 1) >>> 1])) {
+            if (index > 0 && better(heap[index], heap[(index - 1) / HEAP_ARITY])) {
                 siftUp(index);
             } else {
                 siftDown(index);
@@ -195,7 +196,7 @@ public class OrderBookImpl implements OrderBook {
 
         private void siftUp(int index) {
             while (index > 0) {
-                int parent = (index - 1) >>> 1;
+                int parent = (index - 1) / HEAP_ARITY;
                 if (!better(heap[index], heap[parent])) {
                     return;
                 }
@@ -206,15 +207,17 @@ public class OrderBookImpl implements OrderBook {
 
         private void siftDown(int index) {
             while (true) {
-                int left = (index << 1) + 1;
-                if (left >= heapSize) {
+                int firstChild = index * HEAP_ARITY + 1;
+                if (firstChild >= heapSize) {
                     return;
                 }
 
-                int bestChild = left;
-                int right = left + 1;
-                if (right < heapSize && better(heap[right], heap[left])) {
-                    bestChild = right;
+                int bestChild = firstChild;
+                int childLimit = Math.min(firstChild + HEAP_ARITY, heapSize);
+                for (int child = firstChild + 1; child < childLimit; child++) {
+                    if (better(heap[child], heap[bestChild])) {
+                        bestChild = child;
+                    }
                 }
 
                 if (!better(heap[bestChild], heap[index])) {
