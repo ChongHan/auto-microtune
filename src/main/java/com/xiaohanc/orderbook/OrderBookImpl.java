@@ -125,7 +125,7 @@ public class OrderBookImpl implements OrderBook {
         private static final int HEAP_ARITY = 4;
 
         private final boolean buySide;
-        private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>(128, 0.5f);
+        private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>(256, 0.5f);
         private PriceLevel[] heap = new PriceLevel[INITIAL_HEAP_CAPACITY];
         private int heapSize;
 
@@ -544,8 +544,9 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private int mix(long key) {
-            int hash = (int) (key ^ (key >>> 32));
-            return hash ^ (hash >>> 16);
+            long mixed = key ^ (key >>> 33);
+            mixed ^= mixed >>> 17;
+            return (int) mixed;
         }
     }
 
