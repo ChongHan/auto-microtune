@@ -150,11 +150,7 @@ public class OrderBookImpl implements OrderBook {
 
         private void removeLevel(PriceLevel level) {
             levels.remove(level.price);
-            if (level.heapIndex == 0) {
-                removeRoot();
-            } else {
-                removeAt(level.heapIndex);
-            }
+            removeAt(level.heapIndex);
         }
 
         private List<PriceLevel> snapshotLevels() {
@@ -196,22 +192,6 @@ public class OrderBookImpl implements OrderBook {
             } else {
                 siftDown(index);
             }
-        }
-
-        private void removeRoot() {
-            int lastIndex = --heapSize;
-            PriceLevel removed = heap[0];
-            PriceLevel replacement = heap[lastIndex];
-            heap[lastIndex] = null;
-            removed.heapIndex = -1;
-
-            if (lastIndex == 0) {
-                return;
-            }
-
-            heap[0] = replacement;
-            replacement.heapIndex = 0;
-            siftDown(0);
         }
 
         private void siftUp(int index) {
