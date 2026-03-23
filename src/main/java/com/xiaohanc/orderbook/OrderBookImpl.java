@@ -29,7 +29,7 @@ public class OrderBookImpl implements OrderBook {
             level = book.addLevel(price);
         }
 
-        RestingOrder order = new RestingOrder(id, remainingQuantity, level);
+        RestingOrder order = new RestingOrder(id, Math.toIntExact(remainingQuantity), level);
         level.append(order);
         orderById.put(id, order);
     }
@@ -80,7 +80,7 @@ public class OrderBookImpl implements OrderBook {
             RestingOrder maker = level.head;
             while (maker != null && remainingQuantity > 0) {
                 RestingOrder nextMaker = maker.next;
-                long matchedQuantity = Math.min(remainingQuantity, maker.quantity);
+                int matchedQuantity = (int) Math.min(remainingQuantity, maker.quantity);
                 listener.onMatch(maker.id, incomingId, matchedPrice, matchedQuantity);
 
                 remainingQuantity -= matchedQuantity;
@@ -554,14 +554,14 @@ public class OrderBookImpl implements OrderBook {
 
     private static final class PriceLevel {
         private final SideBook book;
-        private final long price;
+        private final int price;
         private int heapIndex = -1;
         private RestingOrder head;
         private RestingOrder tail;
 
         private PriceLevel(SideBook book, long price) {
             this.book = book;
-            this.price = price;
+            this.price = Math.toIntExact(price);
         }
 
         private void append(RestingOrder order) {
@@ -600,12 +600,12 @@ public class OrderBookImpl implements OrderBook {
 
     private static final class RestingOrder {
         private final long id;
-        private long quantity;
+        private int quantity;
         private final PriceLevel level;
         private RestingOrder prev;
         private RestingOrder next;
 
-        private RestingOrder(long id, long quantity, PriceLevel level) {
+        private RestingOrder(long id, int quantity, PriceLevel level) {
             this.id = id;
             this.quantity = quantity;
             this.level = level;
