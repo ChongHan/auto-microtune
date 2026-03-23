@@ -21,6 +21,7 @@ public class OrderBookImpl implements OrderBook {
     private int[] orderLevels = filledIntArray(1024, NO_INDEX);
     private int[] orderPrev = filledIntArray(1024, NO_INDEX);
     private int[] orderNext = filledIntArray(1024, NO_INDEX);
+    private int[] orderMapSlots = filledIntArray(1024, NO_INDEX);
     private byte[] orderSides = new byte[1024];
     private int orderCapacity = 1024;
     private int nextOrderSlot;
@@ -49,12 +50,12 @@ public class OrderBookImpl implements OrderBook {
         orderLevels[orderSlot] = levelSlot;
         orderSides[orderSlot] = book.sideFlag;
         appendOrder(book, levelSlot, orderSlot);
-        orderById.put(id, orderSlot);
+        orderById.put(id, orderSlot, orderMapSlots);
     }
 
     @Override
     public void cancelOrder(long id) {
-        int orderSlot = orderById.remove(id);
+        int orderSlot = orderById.remove(id, orderMapSlots);
         if (orderSlot == NO_INDEX) {
             throw new NoSuchElementException("Order ID not found: " + id);
         }
@@ -65,7 +66,7 @@ public class OrderBookImpl implements OrderBook {
 
     @Override
     public void modifyOrder(long id, long newPrice, long newQuantity) {
-        int orderSlot = orderById.remove(id);
+        int orderSlot = orderById.remove(id, orderMapSlots);
         if (orderSlot == NO_INDEX) {
             throw new NoSuchElementException("Order ID not found: " + id);
         }
@@ -110,7 +111,7 @@ public class OrderBookImpl implements OrderBook {
                 remainingQuantity -= matchedQuantity;
                 long remainingMakerQuantity = orderQuantities[makerSlot] - matchedQuantity;
                 if (remainingMakerQuantity == 0) {
-                    orderById.remove(orderIds[makerSlot]);
+                    orderById.removeValue(makerSlot, orderMapSlots);
                     removeMatchedHead(oppositeBook, levelSlot, makerSlot, nextMakerSlot);
                     releaseOrderSlot(makerSlot);
                 } else {
@@ -197,6 +198,7 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private void releaseOrderSlot(int orderSlot) {
+        orderMapSlots[orderSlot] = NO_INDEX;
         orderNext[orderSlot] = freeOrderSlot;
         freeOrderSlot = orderSlot;
     }
@@ -208,6 +210,7 @@ public class OrderBookImpl implements OrderBook {
         orderLevels = growIntArray(orderLevels, newCapacity);
         orderPrev = growIntArray(orderPrev, newCapacity);
         orderNext = growIntArray(orderNext, newCapacity);
+        orderMapSlots = growIntArray(orderMapSlots, newCapacity);
         orderSides = Arrays.copyOf(orderSides, newCapacity);
         orderCapacity = newCapacity;
     }
@@ -252,6 +255,7 @@ public class OrderBookImpl implements OrderBook {
         private int[] levelHeads = filledIntArray(INITIAL_LEVEL_CAPACITY, NO_INDEX);
         private int[] levelTails = filledIntArray(INITIAL_LEVEL_CAPACITY, NO_INDEX);
         private int[] levelHeapIndex = filledIntArray(INITIAL_LEVEL_CAPACITY, NO_INDEX);
+        private int[] levelMapSlots = filledIntArray(INITIAL_LEVEL_CAPACITY, NO_INDEX);
         private int levelCapacity = INITIAL_LEVEL_CAPACITY;
         private int nextLevelSlot;
         private int freeLevelSlot = NO_INDEX;
@@ -274,7 +278,7 @@ public class OrderBookImpl implements OrderBook {
             levelKeys[levelSlot] = buySide ? -price : price;
             levelHeads[levelSlot] = NO_INDEX;
             levelTails[levelSlot] = NO_INDEX;
-            levels.put(price, levelSlot);
+            levels.put(price, levelSlot, levelMapSlots);
             push(levelSlot);
             return levelSlot;
         }
@@ -284,7 +288,7 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private void removeLevel(int levelSlot) {
-            levels.remove(levelPrices[levelSlot]);
+            levels.removeValue(levelSlot, levelMapSlots);
             removeAt(levelHeapIndex[levelSlot]);
             releaseLevelSlot(levelSlot);
         }
@@ -387,6 +391,7 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private void releaseLevelSlot(int levelSlot) {
+            levelMapSlots[levelSlot] = NO_INDEX;
             levelHeads[levelSlot] = freeLevelSlot;
             freeLevelSlot = levelSlot;
         }
@@ -398,6 +403,7 @@ public class OrderBookImpl implements OrderBook {
             levelHeads = growIntArray(levelHeads, newCapacity);
             levelTails = growIntArray(levelTails, newCapacity);
             levelHeapIndex = growIntArray(levelHeapIndex, newCapacity);
+            levelMapSlots = growIntArray(levelMapSlots, newCapacity);
             levelCapacity = newCapacity;
         }
 
@@ -463,9 +469,9 @@ public class OrderBookImpl implements OrderBook {
             }
         }
 
-        private int put(long key, int value) {
+        private void put(long key, int value, int[] slotIndexes) {
             if (size >= resizeThreshold) {
-                resize();
+                resize(slotIndexes);
             }
 
             int mask = values.length - 1;
@@ -475,18 +481,23 @@ public class OrderBookImpl implements OrderBook {
                 if (current == missingValue) {
                     keys[index] = key;
                     values[index] = value;
+                    slotIndexes[value] = index;
                     size++;
-                    return missingValue;
+                    return;
                 }
                 if (keys[index] == key) {
+                    if (current != missingValue) {
+                        slotIndexes[current] = missingValue;
+                    }
                     values[index] = value;
-                    return current;
+                    slotIndexes[value] = index;
+                    return;
                 }
                 index = (index + 1) & mask;
             }
         }
 
-        private int remove(long key) {
+        private int remove(long key, int[] slotIndexes) {
             int mask = values.length - 1;
             int index = mix(key) & mask;
             while (true) {
@@ -496,14 +507,24 @@ public class OrderBookImpl implements OrderBook {
                 }
                 if (keys[index] == key) {
                     int removed = current;
-                    deleteIndex(index);
+                    slotIndexes[removed] = missingValue;
+                    deleteIndex(index, slotIndexes);
                     return removed;
                 }
                 index = (index + 1) & mask;
             }
         }
 
-        private void deleteIndex(int index) {
+        private void removeValue(int value, int[] slotIndexes) {
+            int index = slotIndexes[value];
+            if (index == missingValue) {
+                return;
+            }
+            slotIndexes[value] = missingValue;
+            deleteIndex(index, slotIndexes);
+        }
+
+        private void deleteIndex(int index, int[] slotIndexes) {
             int mask = values.length - 1;
             size--;
             int gap = index;
@@ -519,13 +540,14 @@ public class OrderBookImpl implements OrderBook {
                 if (((next - home) & mask) >= ((gap - home) & mask)) {
                     keys[gap] = keys[next];
                     values[gap] = value;
+                    slotIndexes[value] = gap;
                     gap = next;
                 }
                 next = (next + 1) & mask;
             }
         }
 
-        private void resize() {
+        private void resize(int[] slotIndexes) {
             long[] oldKeys = keys;
             int[] oldValues = values;
             keys = new long[oldKeys.length << 1];
@@ -537,13 +559,13 @@ public class OrderBookImpl implements OrderBook {
             for (int i = 0; i < oldValues.length; i++) {
                 int value = oldValues[i];
                 if (value != missingValue) {
-                    reinsert(oldKeys[i], value);
+                    reinsert(oldKeys[i], value, slotIndexes);
                 }
             }
             size = oldSize;
         }
 
-        private void reinsert(long key, int value) {
+        private void reinsert(long key, int value, int[] slotIndexes) {
             int mask = values.length - 1;
             int index = mix(key) & mask;
             while (values[index] != missingValue) {
@@ -551,6 +573,7 @@ public class OrderBookImpl implements OrderBook {
             }
             keys[index] = key;
             values[index] = value;
+            slotIndexes[value] = index;
             size++;
         }
 
