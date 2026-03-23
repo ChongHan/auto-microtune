@@ -29,7 +29,7 @@ public class OrderBookImpl implements OrderBook {
             level = book.addLevel(price);
         }
 
-        RestingOrder order = new RestingOrder(id, side, price, remainingQuantity, level);
+        RestingOrder order = new RestingOrder(id, price, remainingQuantity, level);
         level.append(order);
         orderById.put(id, order);
     }
@@ -51,7 +51,7 @@ public class OrderBookImpl implements OrderBook {
             throw new NoSuchElementException("Order ID not found: " + id);
         }
 
-        Order.Side side = order.side;
+        Order.Side side = order.level.book.side();
         cancelOrder(id);
         addOrder(id, side, newPrice, newQuantity);
     }
@@ -114,7 +114,7 @@ public class OrderBookImpl implements OrderBook {
         List<Order> orders = new ArrayList<>(orderById.size());
         for (PriceLevel level : levels) {
             for (RestingOrder order = level.head; order != null; order = order.next) {
-                orders.add(new Order(order.id, order.side, order.price, order.quantity));
+                orders.add(new Order(order.id, level.book.side(), order.price, order.quantity));
             }
         }
         return Collections.unmodifiableList(orders);
@@ -240,6 +240,10 @@ public class OrderBookImpl implements OrderBook {
             heap[right] = leftLevel;
             leftLevel.heapIndex = right;
             rightLevel.heapIndex = left;
+        }
+
+        private Order.Side side() {
+            return buySide ? Order.Side.BUY : Order.Side.SELL;
         }
     }
 
@@ -594,16 +598,14 @@ public class OrderBookImpl implements OrderBook {
 
     private static final class RestingOrder {
         private final long id;
-        private final Order.Side side;
         private final long price;
         private long quantity;
         private final PriceLevel level;
         private RestingOrder prev;
         private RestingOrder next;
 
-        private RestingOrder(long id, Order.Side side, long price, long quantity, PriceLevel level) {
+        private RestingOrder(long id, long price, long quantity, PriceLevel level) {
             this.id = id;
-            this.side = side;
             this.price = price;
             this.quantity = quantity;
             this.level = level;
