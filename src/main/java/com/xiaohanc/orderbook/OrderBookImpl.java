@@ -72,13 +72,27 @@ public class OrderBookImpl implements OrderBook {
 
         while (remainingQuantity > 0) {
             PriceLevel level = oppositeBook.best();
-            if (level == null || !crosses(incomingSide, incomingPrice, level.price)) {
+            if (level == null) {
                 break;
             }
 
-            RestingOrder maker = level.head;
-            while (maker != null && remainingQuantity > 0) {
-                RestingOrder nextMaker = maker.next;
+            level.prepareForAccess();
+            if (level.isEmpty()) {
+                oppositeBook.removeLevel(level);
+                continue;
+            }
+
+            if (!crosses(incomingSide, incomingPrice, level.price)) {
+                break;
+            }
+
+            while (remainingQuantity > 0) {
+                RestingOrder maker = level.head;
+                if (maker == null) {
+                    oppositeBook.removeLevel(level);
+                    break;
+                }
+
                 long matchedQuantity = Math.min(remainingQuantity, maker.quantity);
                 listener.onMatch(maker.id, incomingId, maker.price, matchedQuantity);
 
@@ -86,9 +100,12 @@ public class OrderBookImpl implements OrderBook {
                 maker.quantity -= matchedQuantity;
                 if (maker.quantity == 0) {
                     orderById.remove(maker.id);
-                    removeOrder(maker);
+                    level.removeMatchedHead();
+                    if (level.isEmpty()) {
+                        oppositeBook.removeLevel(level);
+                        break;
+                    }
                 }
-                maker = nextMaker;
             }
         }
 
@@ -103,7 +120,7 @@ public class OrderBookImpl implements OrderBook {
 
     private void removeOrder(RestingOrder order) {
         PriceLevel level = order.level;
-        level.unlink(order);
+        level.tombstone(order);
         if (level.isEmpty()) {
             level.book.removeLevel(level);
         }
@@ -113,8 +130,15 @@ public class OrderBookImpl implements OrderBook {
         List<PriceLevel> levels = book.snapshotLevels();
         List<Order> orders = new ArrayList<>(orderById.size());
         for (PriceLevel level : levels) {
+            level.prepareForSnapshot();
+            if (level.isEmpty()) {
+                level.book.removeLevel(level);
+                continue;
+            }
             for (RestingOrder order = level.head; order != null; order = order.next) {
-                orders.add(new Order(order.id, level.book.side(), order.price, order.quantity));
+                if (order.quantity != 0) {
+                    orders.add(new Order(order.id, level.book.side(), order.price, order.quantity));
+                }
             }
         }
         return Collections.unmodifiableList(orders);
@@ -551,11 +575,15 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private static final class PriceLevel {
+        private static final int COMPACT_THRESHOLD = 8;
+
         private final SideBook book;
         private final long price;
         private int heapIndex = -1;
         private RestingOrder head;
         private RestingOrder tail;
+        private int liveOrderCount;
+        private int deadOrderCount;
 
         private PriceLevel(SideBook book, long price) {
             this.book = book;
@@ -563,36 +591,113 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private void append(RestingOrder order) {
+            order.next = null;
             if (tail == null) {
                 head = order;
                 tail = order;
+            } else {
+                tail.next = order;
+                tail = order;
+            }
+            liveOrderCount++;
+        }
+
+        private void tombstone(RestingOrder order) {
+            order.quantity = 0;
+            liveOrderCount--;
+            if (liveOrderCount == 0) {
+                clear();
                 return;
             }
 
-            tail.next = order;
-            order.prev = tail;
-            tail = order;
+            deadOrderCount++;
+            if (order == head) {
+                pruneDeadFront();
+                return;
+            }
+
+            maybeCompact();
         }
 
-        private void unlink(RestingOrder order) {
-            RestingOrder prev = order.prev;
-            RestingOrder next = order.next;
-            if (prev == null) {
-                head = next;
-            } else {
-                prev.next = next;
+        private void removeMatchedHead() {
+            RestingOrder matched = head;
+            head = matched.next;
+            matched.next = null;
+            liveOrderCount--;
+            if (liveOrderCount == 0) {
+                clear();
+                return;
             }
-            if (next == null) {
-                tail = prev;
-            } else {
-                next.prev = prev;
+            if (head == null) {
+                tail = null;
+                return;
             }
-            order.prev = null;
-            order.next = null;
+            pruneDeadFront();
+            maybeCompact();
+        }
+
+        private void prepareForAccess() {
+            pruneDeadFront();
+            maybeCompact();
+        }
+
+        private void prepareForSnapshot() {
+            if (deadOrderCount != 0) {
+                compact();
+            }
+        }
+
+        private void pruneDeadFront() {
+            while (head != null && head.quantity == 0) {
+                RestingOrder removed = head;
+                head = removed.next;
+                removed.next = null;
+                deadOrderCount--;
+            }
+            if (head == null) {
+                tail = null;
+            }
+        }
+
+        private void maybeCompact() {
+            if (deadOrderCount >= COMPACT_THRESHOLD && deadOrderCount > liveOrderCount) {
+                compact();
+            }
+        }
+
+        private void compact() {
+            RestingOrder newHead = null;
+            RestingOrder newTail = null;
+            RestingOrder current = head;
+            while (current != null) {
+                RestingOrder next = current.next;
+                if (current.quantity != 0) {
+                    if (newTail == null) {
+                        newHead = current;
+                    } else {
+                        newTail.next = current;
+                    }
+                    newTail = current;
+                    current.next = null;
+                } else {
+                    current.next = null;
+                }
+                current = next;
+            }
+            head = newHead;
+            tail = newTail;
+            deadOrderCount = 0;
+        }
+
+        private void clear() {
+            head = null;
+            tail = null;
+            liveOrderCount = 0;
+            deadOrderCount = 0;
         }
 
         private boolean isEmpty() {
-            return head == null;
+            return liveOrderCount == 0;
         }
     }
 
@@ -601,7 +706,6 @@ public class OrderBookImpl implements OrderBook {
         private final long price;
         private long quantity;
         private final PriceLevel level;
-        private RestingOrder prev;
         private RestingOrder next;
 
         private RestingOrder(long id, long price, long quantity, PriceLevel level) {
