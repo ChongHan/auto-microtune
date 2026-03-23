@@ -79,16 +79,14 @@ public class OrderBookImpl implements OrderBook {
             RestingOrder maker = level.head;
             while (maker != null && remainingQuantity > 0) {
                 RestingOrder nextMaker = maker.next;
-                long makerQuantity = maker.quantity;
-                if (makerQuantity <= remainingQuantity) {
-                    listener.onMatch(maker.id, incomingId, maker.price, makerQuantity);
-                    remainingQuantity -= makerQuantity;
+                long matchedQuantity = Math.min(remainingQuantity, maker.quantity);
+                listener.onMatch(maker.id, incomingId, maker.price, matchedQuantity);
+
+                remainingQuantity -= matchedQuantity;
+                maker.quantity -= matchedQuantity;
+                if (maker.quantity == 0) {
                     orderById.remove(maker.id);
                     removeOrder(maker);
-                } else {
-                    listener.onMatch(maker.id, incomingId, maker.price, remainingQuantity);
-                    maker.quantity = makerQuantity - remainingQuantity;
-                    remainingQuantity = 0;
                 }
                 maker = nextMaker;
             }
