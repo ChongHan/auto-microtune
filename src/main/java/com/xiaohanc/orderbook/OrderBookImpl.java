@@ -19,7 +19,8 @@ public class OrderBookImpl implements OrderBook {
     private long[] orderIds = new long[1024];
     private long[] orderQuantities = new long[1024];
     private int[] orderLevels = filledIntArray(1024, NO_INDEX);
-    private long[] orderLinks = filledLongArray(1024, packInts(NO_INDEX, NO_INDEX));
+    private int[] orderPrev = filledIntArray(1024, NO_INDEX);
+    private int[] orderNext = filledIntArray(1024, NO_INDEX);
     private int[] orderMapSlots = filledIntArray(1024, NO_INDEX);
     private int orderCapacity = 1024;
     private int nextOrderSlot;
@@ -101,7 +102,7 @@ public class OrderBookImpl implements OrderBook {
 
             int makerSlot = oppositeBook.levelHeads[levelSlot];
             while (makerSlot != NO_INDEX && remainingQuantity > 0) {
-                int nextMakerSlot = orderNext(makerSlot);
+                int nextMakerSlot = orderNext[makerSlot];
                 long matchedQuantity = Math.min(remainingQuantity, orderQuantities[makerSlot]);
                 listener.onMatch(orderIds[makerSlot], incomingId, matchedPrice, matchedQuantity);
 
@@ -131,22 +132,23 @@ public class OrderBookImpl implements OrderBook {
         int levelRef = orderLevels[orderSlot];
         SideBook book = levelRef >= 0 ? bids : asks;
         int levelSlot = levelRef & Integer.MAX_VALUE;
-        int prevOrderSlot = orderPrev(orderSlot);
-        int nextOrderSlot = orderNext(orderSlot);
+        int prevOrderSlot = orderPrev[orderSlot];
+        int nextOrderSlot = orderNext[orderSlot];
 
         if (prevOrderSlot == NO_INDEX) {
             book.levelHeads[levelSlot] = nextOrderSlot;
         } else {
-            setOrderNext(prevOrderSlot, nextOrderSlot);
+            orderNext[prevOrderSlot] = nextOrderSlot;
         }
 
         if (nextOrderSlot == NO_INDEX) {
             book.levelTails[levelSlot] = prevOrderSlot;
         } else {
-            setOrderPrev(nextOrderSlot, prevOrderSlot);
+            orderPrev[nextOrderSlot] = prevOrderSlot;
         }
 
-        orderLinks[orderSlot] = packInts(NO_INDEX, NO_INDEX);
+        orderPrev[orderSlot] = NO_INDEX;
+        orderNext[orderSlot] = NO_INDEX;
         if (book.levelHeads[levelSlot] == NO_INDEX) {
             book.removeLevel(levelSlot);
         }
@@ -154,19 +156,21 @@ public class OrderBookImpl implements OrderBook {
 
     private void appendOrder(SideBook book, int levelSlot, int orderSlot) {
         int tail = book.levelTails[levelSlot];
-        orderLinks[orderSlot] = packInts(tail, NO_INDEX);
+        orderPrev[orderSlot] = tail;
+        orderNext[orderSlot] = NO_INDEX;
         if (tail == NO_INDEX) {
             book.levelHeads[levelSlot] = orderSlot;
             book.levelTails[levelSlot] = orderSlot;
             return;
         }
 
-        setOrderNext(tail, orderSlot);
+        orderNext[tail] = orderSlot;
         book.levelTails[levelSlot] = orderSlot;
     }
 
     private void removeMatchedHead(SideBook book, int levelSlot, int orderSlot, int nextOrderSlot) {
-        orderLinks[orderSlot] = packInts(NO_INDEX, NO_INDEX);
+        orderPrev[orderSlot] = NO_INDEX;
+        orderNext[orderSlot] = NO_INDEX;
         if (nextOrderSlot == NO_INDEX) {
             book.levelHeads[levelSlot] = NO_INDEX;
             book.levelTails[levelSlot] = NO_INDEX;
@@ -175,13 +179,13 @@ public class OrderBookImpl implements OrderBook {
         }
 
         book.levelHeads[levelSlot] = nextOrderSlot;
-        setOrderPrev(nextOrderSlot, NO_INDEX);
+        orderPrev[nextOrderSlot] = NO_INDEX;
     }
 
     private int allocateOrderSlot() {
         int orderSlot = freeOrderSlot;
         if (orderSlot != NO_INDEX) {
-            freeOrderSlot = orderNext(orderSlot);
+            freeOrderSlot = orderNext[orderSlot];
             return orderSlot;
         }
 
@@ -194,7 +198,7 @@ public class OrderBookImpl implements OrderBook {
 
     private void releaseOrderSlot(int orderSlot) {
         orderMapSlots[orderSlot] = NO_INDEX;
-        orderLinks[orderSlot] = packInts(NO_INDEX, freeOrderSlot);
+        orderNext[orderSlot] = freeOrderSlot;
         freeOrderSlot = orderSlot;
     }
 
@@ -203,7 +207,8 @@ public class OrderBookImpl implements OrderBook {
         orderIds = Arrays.copyOf(orderIds, newCapacity);
         orderQuantities = Arrays.copyOf(orderQuantities, newCapacity);
         orderLevels = growIntArray(orderLevels, newCapacity);
-        orderLinks = Arrays.copyOf(orderLinks, newCapacity);
+        orderPrev = growIntArray(orderPrev, newCapacity);
+        orderNext = growIntArray(orderNext, newCapacity);
         orderMapSlots = growIntArray(orderMapSlots, newCapacity);
         orderCapacity = newCapacity;
     }
@@ -221,7 +226,7 @@ public class OrderBookImpl implements OrderBook {
         Order.Side side = book.side();
         for (int levelSlot : levelSlots) {
             long price = book.levelPrices[levelSlot];
-            for (int orderSlot = book.levelHeads[levelSlot]; orderSlot != NO_INDEX; orderSlot = orderNext(orderSlot)) {
+            for (int orderSlot = book.levelHeads[levelSlot]; orderSlot != NO_INDEX; orderSlot = orderNext[orderSlot]) {
                 orders.add(new Order(orderIds[orderSlot], side, price, orderQuantities[orderSlot]));
             }
         }
@@ -232,40 +237,6 @@ public class OrderBookImpl implements OrderBook {
         int[] array = new int[length];
         Arrays.fill(array, value);
         return array;
-    }
-
-    private static long[] filledLongArray(int length, long value) {
-        long[] array = new long[length];
-        Arrays.fill(array, value);
-        return array;
-    }
-
-    private static long packInts(int low, int high) {
-        return (low & 0xffffffffL) | ((long) high << 32);
-    }
-
-    private static int lowInt(long packed) {
-        return (int) packed;
-    }
-
-    private static int highInt(long packed) {
-        return (int) (packed >>> 32);
-    }
-
-    private int orderPrev(int orderSlot) {
-        return lowInt(orderLinks[orderSlot]);
-    }
-
-    private int orderNext(int orderSlot) {
-        return highInt(orderLinks[orderSlot]);
-    }
-
-    private void setOrderPrev(int orderSlot, int prevOrderSlot) {
-        orderLinks[orderSlot] = packInts(prevOrderSlot, orderNext(orderSlot));
-    }
-
-    private void setOrderNext(int orderSlot, int nextOrderSlot) {
-        orderLinks[orderSlot] = packInts(orderPrev(orderSlot), nextOrderSlot);
     }
 
     private static final class OrderMap {
