@@ -578,7 +578,9 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private int mix(long key) {
-            return (int) (key ^ (key >>> 32));
+            long mixed = key ^ (key >>> 33);
+            mixed ^= mixed >>> 17;
+            return (int) mixed;
         }
     }
 }
