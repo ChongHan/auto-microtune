@@ -9,7 +9,7 @@ import java.util.Objects;
 public class OrderBookImpl implements OrderBook {
     private final SideBook bids = new SideBook(true);
     private final SideBook asks = new SideBook(false);
-    private final LongObjectMap<RestingOrder> orderById = new LongObjectMap<>(4096);
+    private final LongOrderMap orderById = new LongOrderMap(4096);
     private final OrderMatchListener listener;
 
     public OrderBookImpl(OrderMatchListener listener) {
@@ -404,6 +404,145 @@ public class OrderBookImpl implements OrderBook {
         @SuppressWarnings("unchecked")
         private V cast(Object value) {
             return (V) value;
+        }
+    }
+
+    private static final class LongOrderMap {
+        private long[] keys;
+        private RestingOrder[] values;
+        private int size;
+        private final float loadFactor;
+        private int resizeThreshold;
+
+        private LongOrderMap(int capacity) {
+            this(capacity, 0.6f);
+        }
+
+        private LongOrderMap(int capacity, float loadFactor) {
+            int actualCapacity = 1;
+            while (actualCapacity < capacity) {
+                actualCapacity <<= 1;
+            }
+            this.loadFactor = loadFactor;
+            keys = new long[actualCapacity];
+            values = new RestingOrder[actualCapacity];
+            resizeThreshold = (int) (actualCapacity * loadFactor);
+        }
+
+        private int size() {
+            return size;
+        }
+
+        private RestingOrder get(long key) {
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
+            while (true) {
+                RestingOrder value = values[index];
+                if (value == null) {
+                    return null;
+                }
+                if (keys[index] == key) {
+                    return value;
+                }
+                index = (index + 1) & mask;
+            }
+        }
+
+        private RestingOrder put(long key, RestingOrder value) {
+            if (size >= resizeThreshold) {
+                resize();
+            }
+
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
+            while (true) {
+                RestingOrder current = values[index];
+                if (current == null) {
+                    keys[index] = key;
+                    values[index] = value;
+                    size++;
+                    return null;
+                }
+                if (keys[index] == key) {
+                    values[index] = value;
+                    return current;
+                }
+                index = (index + 1) & mask;
+            }
+        }
+
+        private RestingOrder remove(long key) {
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
+            while (true) {
+                RestingOrder current = values[index];
+                if (current == null) {
+                    return null;
+                }
+                if (keys[index] == key) {
+                    RestingOrder removed = current;
+                    deleteIndex(index);
+                    return removed;
+                }
+                index = (index + 1) & mask;
+            }
+        }
+
+        private void deleteIndex(int index) {
+            int mask = values.length - 1;
+            size--;
+            int gap = index;
+            int next = (index + 1) & mask;
+            while (true) {
+                RestingOrder value = values[next];
+                if (value == null) {
+                    values[gap] = null;
+                    return;
+                }
+
+                int home = mix(keys[next]) & mask;
+                if (((next - home) & mask) >= ((gap - home) & mask)) {
+                    keys[gap] = keys[next];
+                    values[gap] = value;
+                    gap = next;
+                }
+                next = (next + 1) & mask;
+            }
+        }
+
+        private void resize() {
+            long[] oldKeys = keys;
+            RestingOrder[] oldValues = values;
+            keys = new long[oldKeys.length << 1];
+            values = new RestingOrder[oldValues.length << 1];
+            resizeThreshold = (int) (values.length * loadFactor);
+
+            int oldSize = size;
+            size = 0;
+            for (int i = 0; i < oldValues.length; i++) {
+                RestingOrder value = oldValues[i];
+                if (value != null) {
+                    reinsert(oldKeys[i], value);
+                }
+            }
+            size = oldSize;
+        }
+
+        private void reinsert(long key, RestingOrder value) {
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
+            while (values[index] != null) {
+                index = (index + 1) & mask;
+            }
+            keys[index] = key;
+            values[index] = value;
+            size++;
+        }
+
+        private int mix(long key) {
+            long mixed = key ^ (key >>> 33);
+            mixed ^= mixed >>> 17;
+            return (int) mixed;
         }
     }
 
