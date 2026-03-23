@@ -70,7 +70,7 @@ public class OrderBookImpl implements OrderBook {
             throw new NoSuchElementException("Order ID not found: " + id);
         }
 
-        Order.Side side = sideBook(orderSides[orderSlot]).side();
+        Order.Side side = orderSides[orderSlot] == BUY_SIDE ? Order.Side.BUY : Order.Side.SELL;
         removeOrder(orderSlot);
         releaseOrderSlot(orderSlot);
         addOrder(id, side, newPrice, newQuantity);
@@ -130,7 +130,7 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private void removeOrder(int orderSlot) {
-        SideBook book = sideBook(orderSides[orderSlot]);
+        SideBook book = orderSides[orderSlot] == BUY_SIDE ? bids : asks;
         int levelSlot = orderLevels[orderSlot];
         int prevOrderSlot = orderPrev[orderSlot];
         int nextOrderSlot = orderNext[orderSlot];
@@ -182,16 +182,10 @@ public class OrderBookImpl implements OrderBook {
         orderPrev[nextOrderSlot] = NO_INDEX;
     }
 
-    private SideBook sideBook(byte sideFlag) {
-        return sideFlag == BUY_SIDE ? bids : asks;
-    }
-
     private int allocateOrderSlot() {
         int orderSlot = freeOrderSlot;
         if (orderSlot != NO_INDEX) {
             freeOrderSlot = orderNext[orderSlot];
-            orderPrev[orderSlot] = NO_INDEX;
-            orderNext[orderSlot] = NO_INDEX;
             return orderSlot;
         }
 
@@ -203,11 +197,6 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private void releaseOrderSlot(int orderSlot) {
-        orderIds[orderSlot] = 0L;
-        orderQuantities[orderSlot] = 0L;
-        orderLevels[orderSlot] = NO_INDEX;
-        orderPrev[orderSlot] = NO_INDEX;
-        orderSides[orderSlot] = 0;
         orderNext[orderSlot] = freeOrderSlot;
         freeOrderSlot = orderSlot;
     }
@@ -259,6 +248,7 @@ public class OrderBookImpl implements OrderBook {
         private final LongIntMap levels = new LongIntMap(256, 0.5f, NO_INDEX);
 
         private long[] levelPrices = new long[INITIAL_LEVEL_CAPACITY];
+        private long[] levelKeys = new long[INITIAL_LEVEL_CAPACITY];
         private int[] levelHeads = filledIntArray(INITIAL_LEVEL_CAPACITY, NO_INDEX);
         private int[] levelTails = filledIntArray(INITIAL_LEVEL_CAPACITY, NO_INDEX);
         private int[] levelHeapIndex = filledIntArray(INITIAL_LEVEL_CAPACITY, NO_INDEX);
@@ -281,6 +271,7 @@ public class OrderBookImpl implements OrderBook {
         private int addLevel(long price) {
             int levelSlot = allocateLevelSlot();
             levelPrices[levelSlot] = price;
+            levelKeys[levelSlot] = buySide ? -price : price;
             levelHeads[levelSlot] = NO_INDEX;
             levelTails[levelSlot] = NO_INDEX;
             levels.put(price, levelSlot);
@@ -321,7 +312,7 @@ public class OrderBookImpl implements OrderBook {
             heap[index] = replacement;
             levelHeapIndex[replacement] = index;
             int parent = (index - 1) / HEAP_ARITY;
-            if (index > 0 && better(replacement, heap[parent])) {
+            if (index > 0 && levelKeys[replacement] < levelKeys[heap[parent]]) {
                 siftUp(index);
             } else {
                 siftDown(index);
@@ -330,11 +321,11 @@ public class OrderBookImpl implements OrderBook {
 
         private void siftUp(int index) {
             int levelSlot = heap[index];
-            long price = levelPrices[levelSlot];
+            long levelKey = levelKeys[levelSlot];
             while (index > 0) {
                 int parent = (index - 1) / HEAP_ARITY;
                 int parentSlot = heap[parent];
-                if (!better(price, levelPrices[parentSlot])) {
+                if (levelKey >= levelKeys[parentSlot]) {
                     break;
                 }
 
@@ -348,7 +339,7 @@ public class OrderBookImpl implements OrderBook {
 
         private void siftDown(int index) {
             int levelSlot = heap[index];
-            long price = levelPrices[levelSlot];
+            long levelKey = levelKeys[levelSlot];
             while (true) {
                 int firstChild = index * HEAP_ARITY + 1;
                 if (firstChild >= heapSize) {
@@ -356,18 +347,18 @@ public class OrderBookImpl implements OrderBook {
                 }
 
                 int bestChild = firstChild;
-                long bestChildPrice = levelPrices[heap[firstChild]];
+                long bestChildKey = levelKeys[heap[firstChild]];
                 int childLimit = Math.min(firstChild + HEAP_ARITY, heapSize);
                 for (int child = firstChild + 1; child < childLimit; child++) {
                     int childSlot = heap[child];
-                    long childPrice = levelPrices[childSlot];
-                    if (better(childPrice, bestChildPrice)) {
+                    long childKey = levelKeys[childSlot];
+                    if (childKey < bestChildKey) {
                         bestChild = child;
-                        bestChildPrice = childPrice;
+                        bestChildKey = childKey;
                     }
                 }
 
-                if (!better(bestChildPrice, price)) {
+                if (bestChildKey >= levelKey) {
                     break;
                 }
 
@@ -381,20 +372,10 @@ public class OrderBookImpl implements OrderBook {
             levelHeapIndex[levelSlot] = index;
         }
 
-        private boolean better(int leftSlot, int rightSlot) {
-            return better(levelPrices[leftSlot], levelPrices[rightSlot]);
-        }
-
-        private boolean better(long leftPrice, long rightPrice) {
-            return buySide ? leftPrice > rightPrice : leftPrice < rightPrice;
-        }
-
         private int allocateLevelSlot() {
             int levelSlot = freeLevelSlot;
             if (levelSlot != NO_INDEX) {
                 freeLevelSlot = levelHeads[levelSlot];
-                levelHeads[levelSlot] = NO_INDEX;
-                levelTails[levelSlot] = NO_INDEX;
                 return levelSlot;
             }
 
@@ -406,9 +387,6 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private void releaseLevelSlot(int levelSlot) {
-            levelPrices[levelSlot] = 0L;
-            levelTails[levelSlot] = NO_INDEX;
-            levelHeapIndex[levelSlot] = NO_INDEX;
             levelHeads[levelSlot] = freeLevelSlot;
             freeLevelSlot = levelSlot;
         }
@@ -416,6 +394,7 @@ public class OrderBookImpl implements OrderBook {
         private void growLevelStorage() {
             int newCapacity = levelCapacity << 1;
             levelPrices = Arrays.copyOf(levelPrices, newCapacity);
+            levelKeys = Arrays.copyOf(levelKeys, newCapacity);
             levelHeads = growIntArray(levelHeads, newCapacity);
             levelTails = growIntArray(levelTails, newCapacity);
             levelHeapIndex = growIntArray(levelHeapIndex, newCapacity);
