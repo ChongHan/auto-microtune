@@ -128,32 +128,18 @@ public class OrderBookImpl implements OrderBook {
         private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>(256, 0.5f);
         private PriceLevel[] heap = new PriceLevel[INITIAL_HEAP_CAPACITY];
         private int heapSize;
-        private long cachedPrice;
-        private PriceLevel cachedLevel;
 
         private SideBook(boolean buySide) {
             this.buySide = buySide;
         }
 
         private PriceLevel level(long price) {
-            PriceLevel level = cachedLevel;
-            if (level != null && cachedPrice == price) {
-                return level;
-            }
-
-            level = levels.get(price);
-            if (level != null) {
-                cachedPrice = price;
-                cachedLevel = level;
-            }
-            return level;
+            return levels.get(price);
         }
 
         private PriceLevel addLevel(long price) {
             PriceLevel level = new PriceLevel(this, price);
             levels.put(price, level);
-            cachedPrice = price;
-            cachedLevel = level;
             push(level);
             return level;
         }
@@ -164,9 +150,6 @@ public class OrderBookImpl implements OrderBook {
 
         private void removeLevel(PriceLevel level) {
             levels.remove(level.price);
-            if (cachedLevel == level) {
-                cachedLevel = null;
-            }
             removeAt(level.heapIndex);
         }
 
