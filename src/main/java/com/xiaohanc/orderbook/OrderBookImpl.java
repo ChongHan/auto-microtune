@@ -1,16 +1,30 @@
 package com.xiaohanc.orderbook;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 
 public class OrderBookImpl implements OrderBook {
+    private static final int NO_INDEX = -1;
+    private static final byte BUY_SIDE = 1;
+
     private final SideBook bids = new SideBook(true);
     private final SideBook asks = new SideBook(false);
-    private final LongOrderMap orderById = new LongOrderMap(16384);
+    private final LongIntMap orderById = new LongIntMap(16384, 0.6f, NO_INDEX);
     private final OrderMatchListener listener;
+
+    private long[] orderIds = new long[1024];
+    private long[] orderQuantities = new long[1024];
+    private int[] orderLevels = filledIntArray(1024, NO_INDEX);
+    private int[] orderPrev = filledIntArray(1024, NO_INDEX);
+    private int[] orderNext = filledIntArray(1024, NO_INDEX);
+    private byte[] orderSides = new byte[1024];
+    private int orderCapacity = 1024;
+    private int nextOrderSlot;
+    private int freeOrderSlot = NO_INDEX;
 
     public OrderBookImpl(OrderMatchListener listener) {
         this.listener = Objects.requireNonNull(listener);
@@ -24,35 +38,41 @@ public class OrderBookImpl implements OrderBook {
         }
 
         SideBook book = side == Order.Side.BUY ? bids : asks;
-        PriceLevel level = book.level(price);
-        if (level == null) {
-            level = book.addLevel(price);
+        int levelSlot = book.level(price);
+        if (levelSlot == NO_INDEX) {
+            levelSlot = book.addLevel(price);
         }
 
-        RestingOrder order = new RestingOrder(id, remainingQuantity, level);
-        level.append(order);
-        orderById.put(id, order);
+        int orderSlot = allocateOrderSlot();
+        orderIds[orderSlot] = id;
+        orderQuantities[orderSlot] = remainingQuantity;
+        orderLevels[orderSlot] = levelSlot;
+        orderSides[orderSlot] = book.sideFlag;
+        appendOrder(book, levelSlot, orderSlot);
+        orderById.put(id, orderSlot);
     }
 
     @Override
     public void cancelOrder(long id) {
-        RestingOrder order = orderById.remove(id);
-        if (order == null) {
+        int orderSlot = orderById.remove(id);
+        if (orderSlot == NO_INDEX) {
             throw new NoSuchElementException("Order ID not found: " + id);
         }
 
-        removeOrder(order);
+        removeOrder(orderSlot);
+        releaseOrderSlot(orderSlot);
     }
 
     @Override
     public void modifyOrder(long id, long newPrice, long newQuantity) {
-        RestingOrder order = orderById.get(id);
-        if (order == null) {
+        int orderSlot = orderById.remove(id);
+        if (orderSlot == NO_INDEX) {
             throw new NoSuchElementException("Order ID not found: " + id);
         }
 
-        Order.Side side = order.level.book.side();
-        cancelOrder(id);
+        Order.Side side = sideBook(orderSides[orderSlot]).side();
+        removeOrder(orderSlot);
+        releaseOrderSlot(orderSlot);
         addOrder(id, side, newPrice, newQuantity);
     }
 
@@ -71,25 +91,32 @@ public class OrderBookImpl implements OrderBook {
         long remainingQuantity = incomingQuantity;
 
         while (remainingQuantity > 0) {
-            PriceLevel level = oppositeBook.best();
-            if (level == null || !crosses(incomingSide, incomingPrice, level.price)) {
+            int levelSlot = oppositeBook.bestLevel();
+            if (levelSlot == NO_INDEX) {
                 break;
             }
 
-            long matchedPrice = level.price;
-            RestingOrder maker = level.head;
-            while (maker != null && remainingQuantity > 0) {
-                RestingOrder nextMaker = maker.next;
-                long matchedQuantity = Math.min(remainingQuantity, maker.quantity);
-                listener.onMatch(maker.id, incomingId, matchedPrice, matchedQuantity);
+            long matchedPrice = oppositeBook.levelPrices[levelSlot];
+            if (!crosses(incomingSide, incomingPrice, matchedPrice)) {
+                break;
+            }
+
+            int makerSlot = oppositeBook.levelHeads[levelSlot];
+            while (makerSlot != NO_INDEX && remainingQuantity > 0) {
+                int nextMakerSlot = orderNext[makerSlot];
+                long matchedQuantity = Math.min(remainingQuantity, orderQuantities[makerSlot]);
+                listener.onMatch(orderIds[makerSlot], incomingId, matchedPrice, matchedQuantity);
 
                 remainingQuantity -= matchedQuantity;
-                maker.quantity -= matchedQuantity;
-                if (maker.quantity == 0) {
-                    orderById.remove(maker.id);
-                    removeOrder(maker);
+                long remainingMakerQuantity = orderQuantities[makerSlot] - matchedQuantity;
+                if (remainingMakerQuantity == 0) {
+                    orderById.remove(orderIds[makerSlot]);
+                    removeMatchedHead(oppositeBook, levelSlot, makerSlot, nextMakerSlot);
+                    releaseOrderSlot(makerSlot);
+                } else {
+                    orderQuantities[makerSlot] = remainingMakerQuantity;
                 }
-                maker = nextMaker;
+                makerSlot = nextMakerSlot;
             }
         }
 
@@ -102,94 +129,199 @@ public class OrderBookImpl implements OrderBook {
                 : incomingPrice <= restingPrice;
     }
 
-    private void removeOrder(RestingOrder order) {
-        PriceLevel level = order.level;
-        level.unlink(order);
-        if (level.isEmpty()) {
-            level.book.removeLevel(level);
+    private void removeOrder(int orderSlot) {
+        SideBook book = sideBook(orderSides[orderSlot]);
+        int levelSlot = orderLevels[orderSlot];
+        int prevOrderSlot = orderPrev[orderSlot];
+        int nextOrderSlot = orderNext[orderSlot];
+
+        if (prevOrderSlot == NO_INDEX) {
+            book.levelHeads[levelSlot] = nextOrderSlot;
+        } else {
+            orderNext[prevOrderSlot] = nextOrderSlot;
+        }
+
+        if (nextOrderSlot == NO_INDEX) {
+            book.levelTails[levelSlot] = prevOrderSlot;
+        } else {
+            orderPrev[nextOrderSlot] = prevOrderSlot;
+        }
+
+        orderPrev[orderSlot] = NO_INDEX;
+        orderNext[orderSlot] = NO_INDEX;
+        if (book.levelHeads[levelSlot] == NO_INDEX) {
+            book.removeLevel(levelSlot);
         }
     }
 
+    private void appendOrder(SideBook book, int levelSlot, int orderSlot) {
+        int tail = book.levelTails[levelSlot];
+        orderPrev[orderSlot] = tail;
+        orderNext[orderSlot] = NO_INDEX;
+        if (tail == NO_INDEX) {
+            book.levelHeads[levelSlot] = orderSlot;
+            book.levelTails[levelSlot] = orderSlot;
+            return;
+        }
+
+        orderNext[tail] = orderSlot;
+        book.levelTails[levelSlot] = orderSlot;
+    }
+
+    private void removeMatchedHead(SideBook book, int levelSlot, int orderSlot, int nextOrderSlot) {
+        orderPrev[orderSlot] = NO_INDEX;
+        orderNext[orderSlot] = NO_INDEX;
+        if (nextOrderSlot == NO_INDEX) {
+            book.levelHeads[levelSlot] = NO_INDEX;
+            book.levelTails[levelSlot] = NO_INDEX;
+            book.removeLevel(levelSlot);
+            return;
+        }
+
+        book.levelHeads[levelSlot] = nextOrderSlot;
+        orderPrev[nextOrderSlot] = NO_INDEX;
+    }
+
+    private SideBook sideBook(byte sideFlag) {
+        return sideFlag == BUY_SIDE ? bids : asks;
+    }
+
+    private int allocateOrderSlot() {
+        int orderSlot = freeOrderSlot;
+        if (orderSlot != NO_INDEX) {
+            freeOrderSlot = orderNext[orderSlot];
+            orderPrev[orderSlot] = NO_INDEX;
+            orderNext[orderSlot] = NO_INDEX;
+            return orderSlot;
+        }
+
+        orderSlot = nextOrderSlot++;
+        if (orderSlot == orderCapacity) {
+            growOrderStorage();
+        }
+        return orderSlot;
+    }
+
+    private void releaseOrderSlot(int orderSlot) {
+        orderIds[orderSlot] = 0L;
+        orderQuantities[orderSlot] = 0L;
+        orderLevels[orderSlot] = NO_INDEX;
+        orderPrev[orderSlot] = NO_INDEX;
+        orderSides[orderSlot] = 0;
+        orderNext[orderSlot] = freeOrderSlot;
+        freeOrderSlot = orderSlot;
+    }
+
+    private void growOrderStorage() {
+        int newCapacity = orderCapacity << 1;
+        orderIds = Arrays.copyOf(orderIds, newCapacity);
+        orderQuantities = Arrays.copyOf(orderQuantities, newCapacity);
+        orderLevels = growIntArray(orderLevels, newCapacity);
+        orderPrev = growIntArray(orderPrev, newCapacity);
+        orderNext = growIntArray(orderNext, newCapacity);
+        orderSides = Arrays.copyOf(orderSides, newCapacity);
+        orderCapacity = newCapacity;
+    }
+
+    private int[] growIntArray(int[] source, int newCapacity) {
+        int oldLength = source.length;
+        int[] copy = Arrays.copyOf(source, newCapacity);
+        Arrays.fill(copy, oldLength, newCapacity, NO_INDEX);
+        return copy;
+    }
+
     private List<Order> snapshot(SideBook book) {
-        List<PriceLevel> levels = book.snapshotLevels();
+        List<Integer> levelSlots = book.snapshotLevelSlots();
         List<Order> orders = new ArrayList<>(orderById.size());
-        for (PriceLevel level : levels) {
-            long price = level.price;
-            for (RestingOrder order = level.head; order != null; order = order.next) {
-                orders.add(new Order(order.id, level.book.side(), price, order.quantity));
+        Order.Side side = book.side();
+        for (int levelSlot : levelSlots) {
+            long price = book.levelPrices[levelSlot];
+            for (int orderSlot = book.levelHeads[levelSlot]; orderSlot != NO_INDEX; orderSlot = orderNext[orderSlot]) {
+                orders.add(new Order(orderIds[orderSlot], side, price, orderQuantities[orderSlot]));
             }
         }
         return Collections.unmodifiableList(orders);
     }
 
+    private static int[] filledIntArray(int length, int value) {
+        int[] array = new int[length];
+        Arrays.fill(array, value);
+        return array;
+    }
+
     private static final class SideBook {
+        private static final int INITIAL_LEVEL_CAPACITY = 256;
         private static final int INITIAL_HEAP_CAPACITY = 256;
         private static final int HEAP_ARITY = 5;
 
         private final boolean buySide;
-        private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>(256, 0.5f);
-        private PriceLevel[] heap = new PriceLevel[INITIAL_HEAP_CAPACITY];
+        private final byte sideFlag;
+        private final LongIntMap levels = new LongIntMap(256, 0.5f, NO_INDEX);
+
+        private long[] levelPrices = new long[INITIAL_LEVEL_CAPACITY];
+        private int[] levelHeads = filledIntArray(INITIAL_LEVEL_CAPACITY, NO_INDEX);
+        private int[] levelTails = filledIntArray(INITIAL_LEVEL_CAPACITY, NO_INDEX);
+        private int[] levelHeapIndex = filledIntArray(INITIAL_LEVEL_CAPACITY, NO_INDEX);
+        private int levelCapacity = INITIAL_LEVEL_CAPACITY;
+        private int nextLevelSlot;
+        private int freeLevelSlot = NO_INDEX;
+
+        private int[] heap = new int[INITIAL_HEAP_CAPACITY];
         private int heapSize;
 
         private SideBook(boolean buySide) {
             this.buySide = buySide;
+            this.sideFlag = buySide ? BUY_SIDE : 0;
         }
 
-        private PriceLevel level(long price) {
+        private int level(long price) {
             return levels.get(price);
         }
 
-        private PriceLevel addLevel(long price) {
-            PriceLevel level = new PriceLevel(this, price);
-            levels.put(price, level);
-            push(level);
-            return level;
+        private int addLevel(long price) {
+            int levelSlot = allocateLevelSlot();
+            levelPrices[levelSlot] = price;
+            levelHeads[levelSlot] = NO_INDEX;
+            levelTails[levelSlot] = NO_INDEX;
+            levels.put(price, levelSlot);
+            push(levelSlot);
+            return levelSlot;
         }
 
-        private PriceLevel best() {
-            return heapSize == 0 ? null : heap[0];
+        private int bestLevel() {
+            return heapSize == 0 ? NO_INDEX : heap[0];
         }
 
-        private void removeLevel(PriceLevel level) {
-            levels.remove(level.price);
-            removeAt(level.heapIndex);
+        private void removeLevel(int levelSlot) {
+            levels.remove(levelPrices[levelSlot]);
+            removeAt(levelHeapIndex[levelSlot]);
+            releaseLevelSlot(levelSlot);
         }
 
-        private List<PriceLevel> snapshotLevels() {
-            List<PriceLevel> orderedLevels = new ArrayList<>(levels.size());
-            levels.addValuesTo(orderedLevels);
-            orderedLevels.sort((left, right) -> buySide
-                    ? Long.compare(right.price, left.price)
-                    : Long.compare(left.price, right.price));
-            return orderedLevels;
-        }
-
-        private void push(PriceLevel level) {
+        private void push(int levelSlot) {
             if (heapSize == heap.length) {
-                PriceLevel[] expanded = new PriceLevel[heap.length << 1];
-                System.arraycopy(heap, 0, expanded, 0, heap.length);
-                heap = expanded;
+                heap = Arrays.copyOf(heap, heap.length << 1);
             }
 
-            heap[heapSize] = level;
-            level.heapIndex = heapSize;
+            heap[heapSize] = levelSlot;
+            levelHeapIndex[levelSlot] = heapSize;
             siftUp(heapSize++);
         }
 
         private void removeAt(int index) {
             int lastIndex = --heapSize;
-            PriceLevel removed = heap[index];
-            PriceLevel replacement = heap[lastIndex];
-            heap[lastIndex] = null;
-            removed.heapIndex = -1;
+            int removedLevel = heap[index];
+            int replacement = heap[lastIndex];
+            levelHeapIndex[removedLevel] = NO_INDEX;
 
             if (index == lastIndex) {
                 return;
             }
 
             heap[index] = replacement;
-            replacement.heapIndex = index;
-            if (index > 0 && better(heap[index], heap[(index - 1) / HEAP_ARITY])) {
+            levelHeapIndex[replacement] = index;
+            int parent = (index - 1) / HEAP_ARITY;
+            if (index > 0 && better(replacement, heap[parent])) {
                 siftUp(index);
             } else {
                 siftDown(index);
@@ -197,51 +329,115 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private void siftUp(int index) {
+            int levelSlot = heap[index];
+            long price = levelPrices[levelSlot];
             while (index > 0) {
                 int parent = (index - 1) / HEAP_ARITY;
-                if (!better(heap[index], heap[parent])) {
-                    return;
+                int parentSlot = heap[parent];
+                if (!better(price, levelPrices[parentSlot])) {
+                    break;
                 }
-                swap(index, parent);
+
+                heap[index] = parentSlot;
+                levelHeapIndex[parentSlot] = index;
                 index = parent;
             }
+            heap[index] = levelSlot;
+            levelHeapIndex[levelSlot] = index;
         }
 
         private void siftDown(int index) {
+            int levelSlot = heap[index];
+            long price = levelPrices[levelSlot];
             while (true) {
                 int firstChild = index * HEAP_ARITY + 1;
                 if (firstChild >= heapSize) {
-                    return;
+                    break;
                 }
 
                 int bestChild = firstChild;
+                long bestChildPrice = levelPrices[heap[firstChild]];
                 int childLimit = Math.min(firstChild + HEAP_ARITY, heapSize);
                 for (int child = firstChild + 1; child < childLimit; child++) {
-                    if (better(heap[child], heap[bestChild])) {
+                    int childSlot = heap[child];
+                    long childPrice = levelPrices[childSlot];
+                    if (better(childPrice, bestChildPrice)) {
                         bestChild = child;
+                        bestChildPrice = childPrice;
                     }
                 }
 
-                if (!better(heap[bestChild], heap[index])) {
-                    return;
+                if (!better(bestChildPrice, price)) {
+                    break;
                 }
 
-                swap(index, bestChild);
+                int childSlot = heap[bestChild];
+                heap[index] = childSlot;
+                levelHeapIndex[childSlot] = index;
                 index = bestChild;
             }
+
+            heap[index] = levelSlot;
+            levelHeapIndex[levelSlot] = index;
         }
 
-        private boolean better(PriceLevel left, PriceLevel right) {
-            return buySide ? left.price > right.price : left.price < right.price;
+        private boolean better(int leftSlot, int rightSlot) {
+            return better(levelPrices[leftSlot], levelPrices[rightSlot]);
         }
 
-        private void swap(int left, int right) {
-            PriceLevel leftLevel = heap[left];
-            PriceLevel rightLevel = heap[right];
-            heap[left] = rightLevel;
-            heap[right] = leftLevel;
-            leftLevel.heapIndex = right;
-            rightLevel.heapIndex = left;
+        private boolean better(long leftPrice, long rightPrice) {
+            return buySide ? leftPrice > rightPrice : leftPrice < rightPrice;
+        }
+
+        private int allocateLevelSlot() {
+            int levelSlot = freeLevelSlot;
+            if (levelSlot != NO_INDEX) {
+                freeLevelSlot = levelHeads[levelSlot];
+                levelHeads[levelSlot] = NO_INDEX;
+                levelTails[levelSlot] = NO_INDEX;
+                return levelSlot;
+            }
+
+            levelSlot = nextLevelSlot++;
+            if (levelSlot == levelCapacity) {
+                growLevelStorage();
+            }
+            return levelSlot;
+        }
+
+        private void releaseLevelSlot(int levelSlot) {
+            levelPrices[levelSlot] = 0L;
+            levelTails[levelSlot] = NO_INDEX;
+            levelHeapIndex[levelSlot] = NO_INDEX;
+            levelHeads[levelSlot] = freeLevelSlot;
+            freeLevelSlot = levelSlot;
+        }
+
+        private void growLevelStorage() {
+            int newCapacity = levelCapacity << 1;
+            levelPrices = Arrays.copyOf(levelPrices, newCapacity);
+            levelHeads = growIntArray(levelHeads, newCapacity);
+            levelTails = growIntArray(levelTails, newCapacity);
+            levelHeapIndex = growIntArray(levelHeapIndex, newCapacity);
+            levelCapacity = newCapacity;
+        }
+
+        private int[] growIntArray(int[] source, int newCapacity) {
+            int oldLength = source.length;
+            int[] copy = Arrays.copyOf(source, newCapacity);
+            Arrays.fill(copy, oldLength, newCapacity, NO_INDEX);
+            return copy;
+        }
+
+        private List<Integer> snapshotLevelSlots() {
+            List<Integer> levelSlots = new ArrayList<>(heapSize);
+            for (int i = 0; i < heapSize; i++) {
+                levelSlots.add(heap[i]);
+            }
+            levelSlots.sort((left, right) -> buySide
+                    ? Long.compare(levelPrices[right], levelPrices[left])
+                    : Long.compare(levelPrices[left], levelPrices[right]));
+            return levelSlots;
         }
 
         private Order.Side side() {
@@ -249,189 +445,23 @@ public class OrderBookImpl implements OrderBook {
         }
     }
 
-    private static final class LongObjectMap<V> {
-        private static final int DEFAULT_CAPACITY = 16;
-
+    private static final class LongIntMap {
         private long[] keys;
-        private Object[] values;
+        private int[] values;
         private int size;
         private final float loadFactor;
+        private final int missingValue;
         private int resizeThreshold;
 
-        private LongObjectMap() {
-            this(DEFAULT_CAPACITY, 0.6f);
-        }
-
-        private LongObjectMap(int capacity) {
-            this(capacity, 0.6f);
-        }
-
-        private LongObjectMap(int capacity, float loadFactor) {
+        private LongIntMap(int capacity, float loadFactor, int missingValue) {
             int actualCapacity = 1;
             while (actualCapacity < capacity) {
                 actualCapacity <<= 1;
             }
             this.loadFactor = loadFactor;
+            this.missingValue = missingValue;
             keys = new long[actualCapacity];
-            values = new Object[actualCapacity];
-            resizeThreshold = (int) (actualCapacity * loadFactor);
-        }
-
-        private V get(long key) {
-            int mask = values.length - 1;
-            int index = mix(key) & mask;
-            while (true) {
-                Object value = values[index];
-                if (value == null) {
-                    return null;
-                }
-                if (keys[index] == key) {
-                    return valueAt(index);
-                }
-                index = (index + 1) & mask;
-            }
-        }
-
-        private V put(long key, V value) {
-            if (size >= resizeThreshold) {
-                resize();
-            }
-
-            int mask = values.length - 1;
-            int index = mix(key) & mask;
-            while (true) {
-                Object current = values[index];
-                if (current == null) {
-                    keys[index] = key;
-                    values[index] = value;
-                    size++;
-                    return null;
-                }
-                if (keys[index] == key) {
-                    V previous = valueAt(index);
-                    values[index] = value;
-                    return previous;
-                }
-                index = (index + 1) & mask;
-            }
-        }
-
-        private V remove(long key) {
-            int mask = values.length - 1;
-            int index = mix(key) & mask;
-            while (true) {
-                Object current = values[index];
-                if (current == null) {
-                    return null;
-                }
-                if (keys[index] == key) {
-                    V removed = valueAt(index);
-                    deleteIndex(index);
-                    return removed;
-                }
-                index = (index + 1) & mask;
-            }
-        }
-
-        private int size() {
-            return size;
-        }
-
-        private void addValuesTo(List<V> out) {
-            for (Object value : values) {
-                if (value != null) {
-                    out.add(cast(value));
-                }
-            }
-        }
-
-        private void deleteIndex(int index) {
-            int mask = values.length - 1;
-            size--;
-            int gap = index;
-            int next = (index + 1) & mask;
-            while (true) {
-                Object value = values[next];
-                if (value == null) {
-                    values[gap] = null;
-                    return;
-                }
-
-                int home = mix(keys[next]) & mask;
-                if (((next - home) & mask) >= ((gap - home) & mask)) {
-                    keys[gap] = keys[next];
-                    values[gap] = value;
-                    gap = next;
-                }
-                next = (next + 1) & mask;
-            }
-        }
-
-        private void resize() {
-            long[] oldKeys = keys;
-            Object[] oldValues = values;
-            keys = new long[oldKeys.length << 1];
-            values = new Object[oldValues.length << 1];
-            resizeThreshold = (int) (values.length * loadFactor);
-
-            int oldSize = size;
-            size = 0;
-            for (int i = 0; i < oldValues.length; i++) {
-                Object value = oldValues[i];
-                if (value != null) {
-                    reinsert(oldKeys[i], value);
-                }
-            }
-            size = oldSize;
-        }
-
-        private void reinsert(long key, Object value) {
-            int mask = values.length - 1;
-            int index = mix(key) & mask;
-            while (values[index] != null) {
-                index = (index + 1) & mask;
-            }
-            keys[index] = key;
-            values[index] = value;
-            size++;
-        }
-
-        private int mix(long key) {
-            long mixed = key ^ (key >>> 33);
-            mixed ^= mixed >>> 17;
-            return (int) mixed;
-        }
-
-        @SuppressWarnings("unchecked")
-        private V valueAt(int index) {
-            return (V) values[index];
-        }
-
-        @SuppressWarnings("unchecked")
-        private V cast(Object value) {
-            return (V) value;
-        }
-    }
-
-    private static final class LongOrderMap {
-        private long[] keys;
-        private RestingOrder[] values;
-        private int size;
-        private final float loadFactor;
-        private int resizeThreshold;
-
-        private LongOrderMap(int capacity) {
-            this(capacity, 0.6f);
-        }
-
-        private LongOrderMap(int capacity, float loadFactor) {
-            int actualCapacity = 1;
-            while (actualCapacity < capacity) {
-                actualCapacity <<= 1;
-            }
-            this.loadFactor = loadFactor;
-            keys = new long[actualCapacity];
-            values = new RestingOrder[actualCapacity];
+            values = filledIntArray(actualCapacity, missingValue);
             resizeThreshold = (int) (actualCapacity * loadFactor);
         }
 
@@ -439,13 +469,13 @@ public class OrderBookImpl implements OrderBook {
             return size;
         }
 
-        private RestingOrder get(long key) {
+        private int get(long key) {
             int mask = values.length - 1;
             int index = mix(key) & mask;
             while (true) {
-                RestingOrder value = values[index];
-                if (value == null) {
-                    return null;
+                int value = values[index];
+                if (value == missingValue) {
+                    return missingValue;
                 }
                 if (keys[index] == key) {
                     return value;
@@ -454,7 +484,7 @@ public class OrderBookImpl implements OrderBook {
             }
         }
 
-        private RestingOrder put(long key, RestingOrder value) {
+        private int put(long key, int value) {
             if (size >= resizeThreshold) {
                 resize();
             }
@@ -462,12 +492,12 @@ public class OrderBookImpl implements OrderBook {
             int mask = values.length - 1;
             int index = mix(key) & mask;
             while (true) {
-                RestingOrder current = values[index];
-                if (current == null) {
+                int current = values[index];
+                if (current == missingValue) {
                     keys[index] = key;
                     values[index] = value;
                     size++;
-                    return null;
+                    return missingValue;
                 }
                 if (keys[index] == key) {
                     values[index] = value;
@@ -477,16 +507,16 @@ public class OrderBookImpl implements OrderBook {
             }
         }
 
-        private RestingOrder remove(long key) {
+        private int remove(long key) {
             int mask = values.length - 1;
             int index = mix(key) & mask;
             while (true) {
-                RestingOrder current = values[index];
-                if (current == null) {
-                    return null;
+                int current = values[index];
+                if (current == missingValue) {
+                    return missingValue;
                 }
                 if (keys[index] == key) {
-                    RestingOrder removed = current;
+                    int removed = current;
                     deleteIndex(index);
                     return removed;
                 }
@@ -500,9 +530,9 @@ public class OrderBookImpl implements OrderBook {
             int gap = index;
             int next = (index + 1) & mask;
             while (true) {
-                RestingOrder value = values[next];
-                if (value == null) {
-                    values[gap] = null;
+                int value = values[next];
+                if (value == missingValue) {
+                    values[gap] = missingValue;
                     return;
                 }
 
@@ -518,26 +548,26 @@ public class OrderBookImpl implements OrderBook {
 
         private void resize() {
             long[] oldKeys = keys;
-            RestingOrder[] oldValues = values;
+            int[] oldValues = values;
             keys = new long[oldKeys.length << 1];
-            values = new RestingOrder[oldValues.length << 1];
+            values = filledIntArray(oldValues.length << 1, missingValue);
             resizeThreshold = (int) (values.length * loadFactor);
 
             int oldSize = size;
             size = 0;
             for (int i = 0; i < oldValues.length; i++) {
-                RestingOrder value = oldValues[i];
-                if (value != null) {
+                int value = oldValues[i];
+                if (value != missingValue) {
                     reinsert(oldKeys[i], value);
                 }
             }
             size = oldSize;
         }
 
-        private void reinsert(long key, RestingOrder value) {
+        private void reinsert(long key, int value) {
             int mask = values.length - 1;
             int index = mix(key) & mask;
-            while (values[index] != null) {
+            while (values[index] != missingValue) {
                 index = (index + 1) & mask;
             }
             keys[index] = key;
@@ -549,66 +579,6 @@ public class OrderBookImpl implements OrderBook {
             long mixed = key ^ (key >>> 33);
             mixed ^= mixed >>> 17;
             return (int) mixed;
-        }
-    }
-
-    private static final class PriceLevel {
-        private final SideBook book;
-        private final long price;
-        private int heapIndex = -1;
-        private RestingOrder head;
-        private RestingOrder tail;
-
-        private PriceLevel(SideBook book, long price) {
-            this.book = book;
-            this.price = price;
-        }
-
-        private void append(RestingOrder order) {
-            if (tail == null) {
-                head = order;
-                tail = order;
-                return;
-            }
-
-            tail.next = order;
-            order.prev = tail;
-            tail = order;
-        }
-
-        private void unlink(RestingOrder order) {
-            RestingOrder prev = order.prev;
-            RestingOrder next = order.next;
-            if (prev == null) {
-                head = next;
-            } else {
-                prev.next = next;
-            }
-            if (next == null) {
-                tail = prev;
-            } else {
-                next.prev = prev;
-            }
-            order.prev = null;
-            order.next = null;
-        }
-
-        private boolean isEmpty() {
-            return head == null;
-        }
-    }
-
-    private static final class RestingOrder {
-        private final long id;
-        private long quantity;
-        private final PriceLevel level;
-        private RestingOrder prev;
-        private RestingOrder next;
-
-        private RestingOrder(long id, long quantity, PriceLevel level) {
-            this.id = id;
-            this.quantity = quantity;
-            this.level = level;
         }
     }
 }
