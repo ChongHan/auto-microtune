@@ -254,6 +254,7 @@ public class OrderBookImpl implements OrderBook {
         private Object[] values;
         private int size;
         private final float loadFactor;
+        private int mask;
         private int resizeThreshold;
 
         private LongObjectMap() {
@@ -272,11 +273,11 @@ public class OrderBookImpl implements OrderBook {
             this.loadFactor = loadFactor;
             keys = new long[actualCapacity];
             values = new Object[actualCapacity];
+            mask = actualCapacity - 1;
             resizeThreshold = (int) (actualCapacity * loadFactor);
         }
 
         private V get(long key) {
-            int mask = values.length - 1;
             int index = mix(key) & mask;
             while (true) {
                 Object value = values[index];
@@ -295,7 +296,6 @@ public class OrderBookImpl implements OrderBook {
                 resize();
             }
 
-            int mask = values.length - 1;
             int index = mix(key) & mask;
             while (true) {
                 Object current = values[index];
@@ -315,7 +315,6 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private V remove(long key) {
-            int mask = values.length - 1;
             int index = mix(key) & mask;
             while (true) {
                 Object current = values[index];
@@ -344,7 +343,6 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private void deleteIndex(int index) {
-            int mask = values.length - 1;
             size--;
             int gap = index;
             int next = (index + 1) & mask;
@@ -370,6 +368,7 @@ public class OrderBookImpl implements OrderBook {
             Object[] oldValues = values;
             keys = new long[oldKeys.length << 1];
             values = new Object[oldValues.length << 1];
+            mask = values.length - 1;
             resizeThreshold = (int) (values.length * loadFactor);
 
             int oldSize = size;
@@ -395,9 +394,8 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private int mix(long key) {
-            long mixed = key ^ (key >>> 33);
-            mixed ^= mixed >>> 17;
-            return (int) mixed;
+            int hash = (int) (key ^ (key >>> 32));
+            return hash ^ (hash >>> 16);
         }
 
         @SuppressWarnings("unchecked")
@@ -416,6 +414,7 @@ public class OrderBookImpl implements OrderBook {
         private RestingOrder[] values;
         private int size;
         private final float loadFactor;
+        private int mask;
         private int resizeThreshold;
 
         private LongOrderMap(int capacity) {
@@ -430,6 +429,7 @@ public class OrderBookImpl implements OrderBook {
             this.loadFactor = loadFactor;
             keys = new long[actualCapacity];
             values = new RestingOrder[actualCapacity];
+            mask = actualCapacity - 1;
             resizeThreshold = (int) (actualCapacity * loadFactor);
         }
 
@@ -438,7 +438,6 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private RestingOrder get(long key) {
-            int mask = values.length - 1;
             int index = mix(key) & mask;
             while (true) {
                 RestingOrder value = values[index];
@@ -457,7 +456,6 @@ public class OrderBookImpl implements OrderBook {
                 resize();
             }
 
-            int mask = values.length - 1;
             int index = mix(key) & mask;
             while (true) {
                 RestingOrder current = values[index];
@@ -476,7 +474,6 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private RestingOrder remove(long key) {
-            int mask = values.length - 1;
             int index = mix(key) & mask;
             while (true) {
                 RestingOrder current = values[index];
@@ -493,7 +490,6 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private void deleteIndex(int index) {
-            int mask = values.length - 1;
             size--;
             int gap = index;
             int next = (index + 1) & mask;
@@ -519,6 +515,7 @@ public class OrderBookImpl implements OrderBook {
             RestingOrder[] oldValues = values;
             keys = new long[oldKeys.length << 1];
             values = new RestingOrder[oldValues.length << 1];
+            mask = values.length - 1;
             resizeThreshold = (int) (values.length * loadFactor);
 
             int oldSize = size;
