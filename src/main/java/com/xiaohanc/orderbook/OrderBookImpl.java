@@ -121,7 +121,7 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private static final class SideBook {
-        private static final int INITIAL_HEAP_CAPACITY = 128;
+        private static final int INITIAL_HEAP_CAPACITY = 256;
         private static final int HEAP_ARITY = 4;
 
         private final boolean buySide;
