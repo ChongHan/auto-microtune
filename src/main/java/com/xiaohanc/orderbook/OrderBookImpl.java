@@ -68,7 +68,6 @@ public class OrderBookImpl implements OrderBook {
 
     private long matchOrder(long incomingId, Order.Side incomingSide, long incomingPrice, long incomingQuantity) {
         SideBook oppositeBook = incomingSide == Order.Side.BUY ? asks : bids;
-        OrderMatchListener matchListener = listener;
         long remainingQuantity = incomingQuantity;
 
         while (remainingQuantity > 0) {
@@ -82,7 +81,7 @@ public class OrderBookImpl implements OrderBook {
             while (maker != null && remainingQuantity > 0) {
                 RestingOrder nextMaker = maker.next;
                 long matchedQuantity = Math.min(remainingQuantity, maker.quantity);
-                matchListener.onMatch(maker.id, incomingId, matchedPrice, matchedQuantity);
+                listener.onMatch(maker.id, incomingId, matchedPrice, matchedQuantity);
 
                 remainingQuantity -= matchedQuantity;
                 maker.quantity -= matchedQuantity;
