@@ -128,6 +128,7 @@ public class OrderBookImpl implements OrderBook {
         private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>(256, 0.5f);
         private PriceLevel[] heap = new PriceLevel[INITIAL_HEAP_CAPACITY];
         private int heapSize;
+        private PriceLevel freeLevels;
 
         private SideBook(boolean buySide) {
             this.buySide = buySide;
@@ -138,7 +139,7 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private PriceLevel addLevel(long price) {
-            PriceLevel level = new PriceLevel(this, price);
+            PriceLevel level = acquireLevel(price);
             levels.put(price, level);
             push(level);
             return level;
@@ -151,6 +152,7 @@ public class OrderBookImpl implements OrderBook {
         private void removeLevel(PriceLevel level) {
             levels.remove(level.price);
             removeAt(level.heapIndex);
+            releaseLevel(level);
         }
 
         private List<PriceLevel> snapshotLevels() {
@@ -240,6 +242,26 @@ public class OrderBookImpl implements OrderBook {
             heap[right] = leftLevel;
             leftLevel.heapIndex = right;
             rightLevel.heapIndex = left;
+        }
+
+        private PriceLevel acquireLevel(long price) {
+            PriceLevel level = freeLevels;
+            if (level == null) {
+                return new PriceLevel(this, price);
+            }
+
+            freeLevels = level.freeNext;
+            level.price = price;
+            level.freeNext = null;
+            return level;
+        }
+
+        private void releaseLevel(PriceLevel level) {
+            level.head = null;
+            level.tail = null;
+            level.heapIndex = -1;
+            level.freeNext = freeLevels;
+            freeLevels = level;
         }
 
         private Order.Side side() {
@@ -552,10 +574,11 @@ public class OrderBookImpl implements OrderBook {
 
     private static final class PriceLevel {
         private final SideBook book;
-        private final long price;
+        private long price;
         private int heapIndex = -1;
         private RestingOrder head;
         private RestingOrder tail;
+        private PriceLevel freeNext;
 
         private PriceLevel(SideBook book, long price) {
             this.book = book;
