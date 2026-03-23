@@ -433,7 +433,6 @@ public class OrderBookImpl implements OrderBook {
     private static final class LongIntMap {
         private long[] keys;
         private int[] values;
-        private int[] probeLengths;
         private int size;
         private final float loadFactor;
         private final int missingValue;
@@ -448,7 +447,6 @@ public class OrderBookImpl implements OrderBook {
             this.missingValue = missingValue;
             keys = new long[actualCapacity];
             values = filledIntArray(actualCapacity, missingValue);
-            probeLengths = new int[actualCapacity];
             resizeThreshold = (int) (actualCapacity * loadFactor);
         }
 
@@ -459,20 +457,15 @@ public class OrderBookImpl implements OrderBook {
         private int get(long key) {
             int mask = values.length - 1;
             int index = mix(key) & mask;
-            int probeLength = 1;
             while (true) {
                 int value = values[index];
                 if (value == missingValue) {
-                    return missingValue;
-                }
-                if (probeLength > probeLengths[index]) {
                     return missingValue;
                 }
                 if (keys[index] == key) {
                     return value;
                 }
                 index = (index + 1) & mask;
-                probeLength++;
             }
         }
 
@@ -483,56 +476,33 @@ public class OrderBookImpl implements OrderBook {
 
             int mask = values.length - 1;
             int index = mix(key) & mask;
-            int probeLength = 1;
-            long insertKey = key;
-            int insertValue = value;
             while (true) {
                 int current = values[index];
                 if (current == missingValue) {
-                    keys[index] = insertKey;
-                    values[index] = insertValue;
-                    probeLengths[index] = probeLength;
-                    slotIndexes[insertValue] = index;
+                    keys[index] = key;
+                    values[index] = value;
+                    slotIndexes[value] = index;
                     size++;
                     return;
                 }
-                if (keys[index] == insertKey) {
+                if (keys[index] == key) {
                     if (current != missingValue) {
                         slotIndexes[current] = missingValue;
                     }
-                    values[index] = insertValue;
-                    slotIndexes[insertValue] = index;
+                    values[index] = value;
+                    slotIndexes[value] = index;
                     return;
                 }
-
-                int currentProbeLength = probeLengths[index];
-                if (currentProbeLength < probeLength) {
-                    long displacedKey = keys[index];
-                    int displacedValue = values[index];
-                    keys[index] = insertKey;
-                    values[index] = insertValue;
-                    probeLengths[index] = probeLength;
-                    slotIndexes[insertValue] = index;
-                    insertKey = displacedKey;
-                    insertValue = displacedValue;
-                    probeLength = currentProbeLength;
-                }
-
                 index = (index + 1) & mask;
-                probeLength++;
             }
         }
 
         private int remove(long key, int[] slotIndexes) {
             int mask = values.length - 1;
             int index = mix(key) & mask;
-            int probeLength = 1;
             while (true) {
                 int current = values[index];
                 if (current == missingValue) {
-                    return missingValue;
-                }
-                if (probeLength > probeLengths[index]) {
                     return missingValue;
                 }
                 if (keys[index] == key) {
@@ -542,7 +512,6 @@ public class OrderBookImpl implements OrderBook {
                     return removed;
                 }
                 index = (index + 1) & mask;
-                probeLength++;
             }
         }
 
@@ -561,19 +530,19 @@ public class OrderBookImpl implements OrderBook {
             int gap = index;
             int next = (index + 1) & mask;
             while (true) {
-                int nextProbeLength = probeLengths[next];
-                if (nextProbeLength <= 1) {
+                int value = values[next];
+                if (value == missingValue) {
                     values[gap] = missingValue;
-                    probeLengths[gap] = 0;
                     return;
                 }
 
-                int value = values[next];
-                keys[gap] = keys[next];
-                values[gap] = value;
-                probeLengths[gap] = nextProbeLength - 1;
-                slotIndexes[value] = gap;
-                gap = next;
+                int home = mix(keys[next]) & mask;
+                if (((next - home) & mask) >= ((gap - home) & mask)) {
+                    keys[gap] = keys[next];
+                    values[gap] = value;
+                    slotIndexes[value] = gap;
+                    gap = next;
+                }
                 next = (next + 1) & mask;
             }
         }
@@ -581,32 +550,29 @@ public class OrderBookImpl implements OrderBook {
         private void resize(int[] slotIndexes) {
             long[] oldKeys = keys;
             int[] oldValues = values;
-            int[] oldProbeLengths = probeLengths;
             keys = new long[oldKeys.length << 1];
             values = filledIntArray(oldValues.length << 1, missingValue);
-            probeLengths = new int[oldValues.length << 1];
             resizeThreshold = (int) (values.length * loadFactor);
 
+            int oldSize = size;
             size = 0;
             for (int i = 0; i < oldValues.length; i++) {
-                if (oldProbeLengths[i] != 0) {
-                    int value = oldValues[i];
+                int value = oldValues[i];
+                if (value != missingValue) {
                     reinsert(oldKeys[i], value, slotIndexes);
                 }
             }
+            size = oldSize;
         }
 
         private void reinsert(long key, int value, int[] slotIndexes) {
             int mask = values.length - 1;
             int index = mix(key) & mask;
-            int probeLength = 1;
             while (values[index] != missingValue) {
                 index = (index + 1) & mask;
-                probeLength++;
             }
             keys[index] = key;
             values[index] = value;
-            probeLengths[index] = probeLength;
             slotIndexes[value] = index;
             size++;
         }
