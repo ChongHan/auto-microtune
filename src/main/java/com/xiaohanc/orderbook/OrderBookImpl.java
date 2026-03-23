@@ -24,10 +24,7 @@ public class OrderBookImpl implements OrderBook {
         }
 
         SideBook book = side == Order.Side.BUY ? bids : asks;
-        PriceLevel level = book.level(price);
-        if (level == null) {
-            level = book.addLevel(price);
-        }
+        PriceLevel level = book.levelOrCreate(price);
 
         RestingOrder order = new RestingOrder(id, price, remainingQuantity, level);
         level.append(order);
@@ -86,7 +83,7 @@ public class OrderBookImpl implements OrderBook {
                 maker.quantity -= matchedQuantity;
                 if (maker.quantity == 0) {
                     orderById.remove(maker.id);
-                    removeOrder(maker);
+                    level.removeHead();
                 }
                 maker = nextMaker;
             }
@@ -120,7 +117,7 @@ public class OrderBookImpl implements OrderBook {
         return Collections.unmodifiableList(orders);
     }
 
-    private static final class SideBook {
+    private static final class SideBook implements LongObjectMap.ValueFactory<PriceLevel> {
         private static final int INITIAL_HEAP_CAPACITY = 256;
         private static final int HEAP_ARITY = 4;
 
@@ -135,6 +132,10 @@ public class OrderBookImpl implements OrderBook {
 
         private PriceLevel level(long price) {
             return levels.get(price);
+        }
+
+        private PriceLevel levelOrCreate(long price) {
+            return levels.getOrCreate(price, this);
         }
 
         private PriceLevel addLevel(long price) {
@@ -245,6 +246,13 @@ public class OrderBookImpl implements OrderBook {
         private Order.Side side() {
             return buySide ? Order.Side.BUY : Order.Side.SELL;
         }
+
+        @Override
+        public PriceLevel create(long price) {
+            PriceLevel level = new PriceLevel(this, price);
+            push(level);
+            return level;
+        }
     }
 
     private static final class LongObjectMap<V> {
@@ -255,6 +263,10 @@ public class OrderBookImpl implements OrderBook {
         private int size;
         private final float loadFactor;
         private int resizeThreshold;
+
+        private interface ValueFactory<V> {
+            V create(long key);
+        }
 
         private LongObjectMap() {
             this(DEFAULT_CAPACITY, 0.6f);
@@ -282,6 +294,29 @@ public class OrderBookImpl implements OrderBook {
                 Object value = values[index];
                 if (value == null) {
                     return null;
+                }
+                if (keys[index] == key) {
+                    return valueAt(index);
+                }
+                index = (index + 1) & mask;
+            }
+        }
+
+        private V getOrCreate(long key, ValueFactory<V> factory) {
+            if (size >= resizeThreshold) {
+                resize();
+            }
+
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
+            while (true) {
+                Object current = values[index];
+                if (current == null) {
+                    V value = factory.create(key);
+                    keys[index] = key;
+                    values[index] = value;
+                    size++;
+                    return value;
                 }
                 if (keys[index] == key) {
                     return valueAt(index);
@@ -589,6 +624,20 @@ public class OrderBookImpl implements OrderBook {
             }
             order.prev = null;
             order.next = null;
+        }
+
+        private void removeHead() {
+            RestingOrder removed = head;
+            RestingOrder next = removed.next;
+            head = next;
+            if (next == null) {
+                tail = null;
+                book.removeLevel(this);
+            } else {
+                next.prev = null;
+            }
+            removed.prev = null;
+            removed.next = null;
         }
 
         private boolean isEmpty() {
