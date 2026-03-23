@@ -29,7 +29,7 @@ public class OrderBookImpl implements OrderBook {
             level = book.addLevel(price);
         }
 
-        RestingOrder order = new RestingOrder(id, price, remainingQuantity, level);
+        RestingOrder order = new RestingOrder(id, remainingQuantity, level);
         level.append(order);
         orderById.put(id, order);
     }
@@ -76,11 +76,12 @@ public class OrderBookImpl implements OrderBook {
                 break;
             }
 
+            long matchedPrice = level.price;
             RestingOrder maker = level.head;
             while (maker != null && remainingQuantity > 0) {
                 RestingOrder nextMaker = maker.next;
                 long matchedQuantity = Math.min(remainingQuantity, maker.quantity);
-                listener.onMatch(maker.id, incomingId, maker.price, matchedQuantity);
+                listener.onMatch(maker.id, incomingId, matchedPrice, matchedQuantity);
 
                 remainingQuantity -= matchedQuantity;
                 maker.quantity -= matchedQuantity;
@@ -113,8 +114,9 @@ public class OrderBookImpl implements OrderBook {
         List<PriceLevel> levels = book.snapshotLevels();
         List<Order> orders = new ArrayList<>(orderById.size());
         for (PriceLevel level : levels) {
+            long price = level.price;
             for (RestingOrder order = level.head; order != null; order = order.next) {
-                orders.add(new Order(order.id, level.book.side(), order.price, order.quantity));
+                orders.add(new Order(order.id, level.book.side(), price, order.quantity));
             }
         }
         return Collections.unmodifiableList(orders);
@@ -598,15 +600,13 @@ public class OrderBookImpl implements OrderBook {
 
     private static final class RestingOrder {
         private final long id;
-        private final long price;
         private long quantity;
         private final PriceLevel level;
         private RestingOrder prev;
         private RestingOrder next;
 
-        private RestingOrder(long id, long price, long quantity, PriceLevel level) {
+        private RestingOrder(long id, long quantity, PriceLevel level) {
             this.id = id;
-            this.price = price;
             this.quantity = quantity;
             this.level = level;
         }
