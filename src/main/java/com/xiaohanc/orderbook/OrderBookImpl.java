@@ -9,7 +9,7 @@ import java.util.Objects;
 public class OrderBookImpl implements OrderBook {
     private final SideBook bids = new SideBook(true);
     private final SideBook asks = new SideBook(false);
-    private final LongOrderMap orderById = new LongOrderMap(4096);
+    private final LongOrderMap orderById = new LongOrderMap(16384);
     private final OrderMatchListener listener;
 
     public OrderBookImpl(OrderMatchListener listener) {
