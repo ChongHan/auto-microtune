@@ -379,7 +379,7 @@ public class OrderBookImpl implements OrderBook {
         private static final int HEAP_ARITY = 5;
 
         private final boolean buySide;
-        private final LevelMap levels = new LevelMap(256, 0.35f);
+        private final LevelMap levels = new LevelMap(256, 0.34f);
 
         private long[] levelPrices = new long[INITIAL_LEVEL_CAPACITY];
         private long[] levelKeys = new long[INITIAL_LEVEL_CAPACITY];
