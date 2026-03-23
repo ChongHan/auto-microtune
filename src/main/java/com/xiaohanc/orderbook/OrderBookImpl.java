@@ -11,7 +11,6 @@ public class OrderBookImpl implements OrderBook {
     private final SideBook asks = new SideBook(false);
     private final LongOrderMap orderById = new LongOrderMap(4096);
     private final OrderMatchListener listener;
-    private RestingOrder freeOrders;
 
     public OrderBookImpl(OrderMatchListener listener) {
         this.listener = Objects.requireNonNull(listener);
@@ -30,7 +29,7 @@ public class OrderBookImpl implements OrderBook {
             level = book.addLevel(price);
         }
 
-        RestingOrder order = acquireOrder(id, price, remainingQuantity, level);
+        RestingOrder order = new RestingOrder(id, price, remainingQuantity, level);
         level.append(order);
         orderById.put(id, order);
     }
@@ -108,7 +107,6 @@ public class OrderBookImpl implements OrderBook {
         if (level.isEmpty()) {
             level.book.removeLevel(level);
         }
-        releaseOrder(order);
     }
 
     private List<Order> snapshot(SideBook book) {
@@ -120,32 +118,6 @@ public class OrderBookImpl implements OrderBook {
             }
         }
         return Collections.unmodifiableList(orders);
-    }
-
-    private RestingOrder acquireOrder(long id, long price, long quantity, PriceLevel level) {
-        RestingOrder order = freeOrders;
-        if (order == null) {
-            return new RestingOrder(id, price, quantity, level);
-        }
-
-        freeOrders = order.next;
-        order.id = id;
-        order.price = price;
-        order.quantity = quantity;
-        order.level = level;
-        order.prev = null;
-        order.next = null;
-        return order;
-    }
-
-    private void releaseOrder(RestingOrder order) {
-        order.id = 0L;
-        order.price = 0L;
-        order.quantity = 0L;
-        order.level = null;
-        order.prev = null;
-        order.next = freeOrders;
-        freeOrders = order;
     }
 
     private static final class SideBook {
@@ -625,10 +597,10 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private static final class RestingOrder {
-        private long id;
-        private long price;
+        private final long id;
+        private final long price;
         private long quantity;
-        private PriceLevel level;
+        private final PriceLevel level;
         private RestingOrder prev;
         private RestingOrder next;
 
