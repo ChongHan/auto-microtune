@@ -261,7 +261,6 @@ public class OrderBookImpl implements OrderBook {
         private int freeLevelSlot = NO_INDEX;
 
         private int[] heap = new int[INITIAL_HEAP_CAPACITY];
-        private long[] heapKeys = new long[INITIAL_HEAP_CAPACITY];
         private int heapSize;
 
         private SideBook(boolean buySide) {
@@ -297,11 +296,9 @@ public class OrderBookImpl implements OrderBook {
         private void push(int levelSlot) {
             if (heapSize == heap.length) {
                 heap = Arrays.copyOf(heap, heap.length << 1);
-                heapKeys = Arrays.copyOf(heapKeys, heapKeys.length << 1);
             }
 
             heap[heapSize] = levelSlot;
-            heapKeys[heapSize] = levelKeys[levelSlot];
             levelHeapIndex[levelSlot] = heapSize;
             siftUp(heapSize++);
         }
@@ -310,7 +307,6 @@ public class OrderBookImpl implements OrderBook {
             int lastIndex = --heapSize;
             int removedLevel = heap[index];
             int replacement = heap[lastIndex];
-            long replacementKey = heapKeys[lastIndex];
             levelHeapIndex[removedLevel] = NO_INDEX;
 
             if (index == lastIndex) {
@@ -318,10 +314,9 @@ public class OrderBookImpl implements OrderBook {
             }
 
             heap[index] = replacement;
-            heapKeys[index] = replacementKey;
             levelHeapIndex[replacement] = index;
             int parent = (index - 1) / HEAP_ARITY;
-            if (index > 0 && replacementKey < heapKeys[parent]) {
+            if (index > 0 && levelKeys[replacement] < levelKeys[heap[parent]]) {
                 siftUp(index);
             } else {
                 siftDown(index);
@@ -330,28 +325,25 @@ public class OrderBookImpl implements OrderBook {
 
         private void siftUp(int index) {
             int levelSlot = heap[index];
-            long levelKey = heapKeys[index];
+            long levelKey = levelKeys[levelSlot];
             while (index > 0) {
                 int parent = (index - 1) / HEAP_ARITY;
                 int parentSlot = heap[parent];
-                long parentKey = heapKeys[parent];
-                if (levelKey >= parentKey) {
+                if (levelKey >= levelKeys[parentSlot]) {
                     break;
                 }
 
                 heap[index] = parentSlot;
-                heapKeys[index] = parentKey;
                 levelHeapIndex[parentSlot] = index;
                 index = parent;
             }
             heap[index] = levelSlot;
-            heapKeys[index] = levelKey;
             levelHeapIndex[levelSlot] = index;
         }
 
         private void siftDown(int index) {
             int levelSlot = heap[index];
-            long levelKey = heapKeys[index];
+            long levelKey = levelKeys[levelSlot];
             while (true) {
                 int firstChild = index * HEAP_ARITY + 1;
                 if (firstChild >= heapSize) {
@@ -359,10 +351,11 @@ public class OrderBookImpl implements OrderBook {
                 }
 
                 int bestChild = firstChild;
-                long bestChildKey = heapKeys[firstChild];
+                long bestChildKey = levelKeys[heap[firstChild]];
                 int childLimit = Math.min(firstChild + HEAP_ARITY, heapSize);
                 for (int child = firstChild + 1; child < childLimit; child++) {
-                    long childKey = heapKeys[child];
+                    int childSlot = heap[child];
+                    long childKey = levelKeys[childSlot];
                     if (childKey < bestChildKey) {
                         bestChild = child;
                         bestChildKey = childKey;
@@ -375,13 +368,11 @@ public class OrderBookImpl implements OrderBook {
 
                 int childSlot = heap[bestChild];
                 heap[index] = childSlot;
-                heapKeys[index] = bestChildKey;
                 levelHeapIndex[childSlot] = index;
                 index = bestChild;
             }
 
             heap[index] = levelSlot;
-            heapKeys[index] = levelKey;
             levelHeapIndex[levelSlot] = index;
         }
 
