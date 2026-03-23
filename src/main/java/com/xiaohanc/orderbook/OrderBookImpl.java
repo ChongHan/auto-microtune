@@ -412,15 +412,9 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private static final class LongOrderMap {
-        private static final byte EMPTY = 0;
-        private static final byte FULL = 1;
-        private static final byte DELETED = 2;
-
         private long[] keys;
         private RestingOrder[] values;
-        private byte[] states;
         private int size;
-        private int deletedCount;
         private final float loadFactor;
         private int resizeThreshold;
 
@@ -436,7 +430,6 @@ public class OrderBookImpl implements OrderBook {
             this.loadFactor = loadFactor;
             keys = new long[actualCapacity];
             values = new RestingOrder[actualCapacity];
-            states = new byte[actualCapacity];
             resizeThreshold = (int) (actualCapacity * loadFactor);
         }
 
@@ -448,44 +441,33 @@ public class OrderBookImpl implements OrderBook {
             int mask = values.length - 1;
             int index = mix(key) & mask;
             while (true) {
-                byte state = states[index];
-                if (state == EMPTY) {
+                RestingOrder value = values[index];
+                if (value == null) {
                     return null;
                 }
-                if (state == FULL && keys[index] == key) {
-                    return values[index];
+                if (keys[index] == key) {
+                    return value;
                 }
                 index = (index + 1) & mask;
             }
         }
 
         private RestingOrder put(long key, RestingOrder value) {
-            if (size + deletedCount >= resizeThreshold) {
+            if (size >= resizeThreshold) {
                 resize();
             }
 
             int mask = values.length - 1;
             int index = mix(key) & mask;
-            int firstDeleted = -1;
             while (true) {
-                byte state = states[index];
-                if (state == EMPTY) {
-                    int target = firstDeleted >= 0 ? firstDeleted : index;
-                    if (firstDeleted >= 0) {
-                        deletedCount--;
-                    }
-                    keys[target] = key;
-                    values[target] = value;
-                    states[target] = FULL;
+                RestingOrder current = values[index];
+                if (current == null) {
+                    keys[index] = key;
+                    values[index] = value;
                     size++;
                     return null;
                 }
-                if (state == DELETED) {
-                    if (firstDeleted < 0) {
-                        firstDeleted = index;
-                    }
-                } else if (keys[index] == key) {
-                    RestingOrder current = values[index];
+                if (keys[index] == key) {
                     values[index] = value;
                     return current;
                 }
@@ -497,38 +479,53 @@ public class OrderBookImpl implements OrderBook {
             int mask = values.length - 1;
             int index = mix(key) & mask;
             while (true) {
-                byte state = states[index];
-                if (state == EMPTY) {
+                RestingOrder current = values[index];
+                if (current == null) {
                     return null;
                 }
-                if (state == FULL && keys[index] == key) {
-                    RestingOrder removed = values[index];
-                    values[index] = null;
-                    states[index] = DELETED;
-                    size--;
-                    deletedCount++;
+                if (keys[index] == key) {
+                    RestingOrder removed = current;
+                    deleteIndex(index);
                     return removed;
                 }
                 index = (index + 1) & mask;
             }
         }
 
+        private void deleteIndex(int index) {
+            int mask = values.length - 1;
+            size--;
+            int gap = index;
+            int next = (index + 1) & mask;
+            while (true) {
+                RestingOrder value = values[next];
+                if (value == null) {
+                    values[gap] = null;
+                    return;
+                }
+
+                int home = mix(keys[next]) & mask;
+                if (((next - home) & mask) >= ((gap - home) & mask)) {
+                    keys[gap] = keys[next];
+                    values[gap] = value;
+                    gap = next;
+                }
+                next = (next + 1) & mask;
+            }
+        }
+
         private void resize() {
             long[] oldKeys = keys;
             RestingOrder[] oldValues = values;
-            byte[] oldStates = states;
-            int targetCapacity = deletedCount > (size >> 1) ? oldValues.length : oldValues.length << 1;
-            keys = new long[targetCapacity];
-            values = new RestingOrder[targetCapacity];
-            states = new byte[targetCapacity];
-            resizeThreshold = (int) (targetCapacity * loadFactor);
+            keys = new long[oldKeys.length << 1];
+            values = new RestingOrder[oldValues.length << 1];
+            resizeThreshold = (int) (values.length * loadFactor);
 
             int oldSize = size;
             size = 0;
-            deletedCount = 0;
             for (int i = 0; i < oldValues.length; i++) {
-                if (oldStates[i] == FULL) {
-                    RestingOrder value = oldValues[i];
+                RestingOrder value = oldValues[i];
+                if (value != null) {
                     reinsert(oldKeys[i], value);
                 }
             }
@@ -538,12 +535,11 @@ public class OrderBookImpl implements OrderBook {
         private void reinsert(long key, RestingOrder value) {
             int mask = values.length - 1;
             int index = mix(key) & mask;
-            while (states[index] == FULL) {
+            while (values[index] != null) {
                 index = (index + 1) & mask;
             }
             keys[index] = key;
             values[index] = value;
-            states[index] = FULL;
             size++;
         }
 
