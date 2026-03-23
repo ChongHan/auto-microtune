@@ -13,7 +13,7 @@ public class OrderBookImpl implements OrderBook {
 
     private final SideBook bids = new SideBook(true);
     private final SideBook asks = new SideBook(false);
-    private final LongIntMap orderById = new LongIntMap(16384, 0.55f, NO_INDEX);
+    private final LongIntMap orderById = new LongIntMap(16384, 0.6f, NO_INDEX);
     private final OrderMatchListener listener;
 
     private long[] orderIds = new long[1024];
