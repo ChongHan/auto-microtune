@@ -18,11 +18,20 @@ public class OrderBookImpl implements OrderBook {
 
     @Override
     public void addOrder(long id, Order.Side side, long price, long quantity) {
-        if (side == Order.Side.BUY) {
-            addBuyOrder(id, price, quantity);
-        } else {
-            addSellOrder(id, price, quantity);
+        long remainingQuantity = matchOrder(id, side, price, quantity);
+        if (remainingQuantity == 0) {
+            return;
         }
+
+        SideBook book = side == Order.Side.BUY ? bids : asks;
+        PriceLevel level = book.level(price);
+        if (level == null) {
+            level = book.addLevel(price);
+        }
+
+        RestingOrder order = new RestingOrder(id, price, remainingQuantity, level);
+        level.append(order);
+        orderById.put(id, order);
     }
 
     @Override
@@ -44,11 +53,7 @@ public class OrderBookImpl implements OrderBook {
 
         Order.Side side = order.level.book.side();
         cancelOrder(id);
-        if (side == Order.Side.BUY) {
-            addBuyOrder(id, newPrice, newQuantity);
-        } else {
-            addSellOrder(id, newPrice, newQuantity);
-        }
+        addOrder(id, side, newPrice, newQuantity);
     }
 
     @Override
@@ -61,52 +66,13 @@ public class OrderBookImpl implements OrderBook {
         return snapshot(asks);
     }
 
-    private void addBuyOrder(long id, long price, long quantity) {
-        long remainingQuantity = matchBuyOrder(id, price, quantity);
-        if (remainingQuantity == 0) {
-            return;
-        }
-
-        PriceLevel level = bids.level(price);
-        if (level == null) {
-            level = bids.addLevel(price);
-        }
-
-        RestingOrder order = new RestingOrder(id, price, remainingQuantity, level);
-        level.append(order);
-        orderById.put(id, order);
-    }
-
-    private void addSellOrder(long id, long price, long quantity) {
-        long remainingQuantity = matchSellOrder(id, price, quantity);
-        if (remainingQuantity == 0) {
-            return;
-        }
-
-        PriceLevel level = asks.level(price);
-        if (level == null) {
-            level = asks.addLevel(price);
-        }
-
-        RestingOrder order = new RestingOrder(id, price, remainingQuantity, level);
-        level.append(order);
-        orderById.put(id, order);
-    }
-
-    private long matchBuyOrder(long incomingId, long incomingPrice, long incomingQuantity) {
-        return matchOrder(incomingId, incomingPrice, incomingQuantity, asks, true);
-    }
-
-    private long matchSellOrder(long incomingId, long incomingPrice, long incomingQuantity) {
-        return matchOrder(incomingId, incomingPrice, incomingQuantity, bids, false);
-    }
-
-    private long matchOrder(long incomingId, long incomingPrice, long incomingQuantity, SideBook oppositeBook, boolean buyOrder) {
+    private long matchOrder(long incomingId, Order.Side incomingSide, long incomingPrice, long incomingQuantity) {
+        SideBook oppositeBook = incomingSide == Order.Side.BUY ? asks : bids;
         long remainingQuantity = incomingQuantity;
 
         while (remainingQuantity > 0) {
             PriceLevel level = oppositeBook.best();
-            if (level == null || (buyOrder ? incomingPrice < level.price : incomingPrice > level.price)) {
+            if (level == null || !crosses(incomingSide, incomingPrice, level.price)) {
                 break;
             }
 
@@ -127,6 +93,12 @@ public class OrderBookImpl implements OrderBook {
         }
 
         return remainingQuantity;
+    }
+
+    private boolean crosses(Order.Side incomingSide, long incomingPrice, long restingPrice) {
+        return incomingSide == Order.Side.BUY
+                ? incomingPrice >= restingPrice
+                : incomingPrice <= restingPrice;
     }
 
     private void removeOrder(RestingOrder order) {
