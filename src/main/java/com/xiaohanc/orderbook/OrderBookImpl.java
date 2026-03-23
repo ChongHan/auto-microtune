@@ -248,7 +248,7 @@ public class OrderBookImpl implements OrderBook {
 
         private final boolean buySide;
         private final byte sideFlag;
-        private final LevelMap levels = new LevelMap(256, 0.35f);
+        private final LevelMap levels = new LevelMap(256, 0.32f);
 
         private long[] levelPrices = new long[INITIAL_LEVEL_CAPACITY];
         private long[] levelKeys = new long[INITIAL_LEVEL_CAPACITY];
