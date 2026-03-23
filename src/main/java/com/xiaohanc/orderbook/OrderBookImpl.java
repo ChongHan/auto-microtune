@@ -245,14 +245,10 @@ public class OrderBookImpl implements OrderBook {
         private static final int INITIAL_LEVEL_CAPACITY = 256;
         private static final int INITIAL_HEAP_CAPACITY = 256;
         private static final int HEAP_ARITY = 5;
-        private static final int LEVEL_CACHE_SIZE = 256;
-        private static final int LEVEL_CACHE_MASK = LEVEL_CACHE_SIZE - 1;
 
         private final boolean buySide;
         private final byte sideFlag;
         private final LongIntMap levels = new LongIntMap(256, 0.5f, NO_INDEX);
-        private final long[] cachedPrices = new long[LEVEL_CACHE_SIZE];
-        private final int[] cachedLevelSlots = filledIntArray(LEVEL_CACHE_SIZE, NO_INDEX);
 
         private long[] levelPrices = new long[INITIAL_LEVEL_CAPACITY];
         private long[] levelKeys = new long[INITIAL_LEVEL_CAPACITY];
@@ -273,20 +269,7 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private int level(long price) {
-            int cacheIndex = cacheIndex(price);
-            int cachedLevelSlot = cachedLevelSlots[cacheIndex];
-            if (cachedLevelSlot != NO_INDEX
-                    && cachedPrices[cacheIndex] == price
-                    && levelMapSlots[cachedLevelSlot] != NO_INDEX) {
-                return cachedLevelSlot;
-            }
-
-            int levelSlot = levels.get(price);
-            if (levelSlot != NO_INDEX) {
-                cachedPrices[cacheIndex] = price;
-                cachedLevelSlots[cacheIndex] = levelSlot;
-            }
-            return levelSlot;
+            return levels.get(price);
         }
 
         private int addLevel(long price) {
@@ -296,9 +279,6 @@ public class OrderBookImpl implements OrderBook {
             levelHeads[levelSlot] = NO_INDEX;
             levelTails[levelSlot] = NO_INDEX;
             levels.put(price, levelSlot, levelMapSlots);
-            int cacheIndex = cacheIndex(price);
-            cachedPrices[cacheIndex] = price;
-            cachedLevelSlots[cacheIndex] = levelSlot;
             push(levelSlot);
             return levelSlot;
         }
@@ -308,11 +288,6 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private void removeLevel(int levelSlot) {
-            long price = levelPrices[levelSlot];
-            int cacheIndex = cacheIndex(price);
-            if (cachedLevelSlots[cacheIndex] == levelSlot) {
-                cachedLevelSlots[cacheIndex] = NO_INDEX;
-            }
             levels.removeValue(levelSlot, levelMapSlots);
             removeAt(levelHeapIndex[levelSlot]);
             releaseLevelSlot(levelSlot);
@@ -452,10 +427,6 @@ public class OrderBookImpl implements OrderBook {
 
         private Order.Side side() {
             return buySide ? Order.Side.BUY : Order.Side.SELL;
-        }
-
-        private int cacheIndex(long price) {
-            return ((int) price ^ (int) (price >>> 32)) & LEVEL_CACHE_MASK;
         }
     }
 
