@@ -2,7 +2,6 @@ package com.xiaohanc.orderbook;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
@@ -126,7 +125,7 @@ public class OrderBookImpl implements OrderBook {
         private static final int HEAP_ARITY = 4;
 
         private final boolean buySide;
-        private final HashMap<Long, PriceLevel> levels = new HashMap<>(256);
+        private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>(256, 0.5f);
         private PriceLevel[] heap = new PriceLevel[INITIAL_HEAP_CAPACITY];
         private int heapSize;
 
@@ -155,7 +154,8 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private List<PriceLevel> snapshotLevels() {
-            List<PriceLevel> orderedLevels = new ArrayList<>(levels.values());
+            List<PriceLevel> orderedLevels = new ArrayList<>(levels.size());
+            levels.addValuesTo(orderedLevels);
             orderedLevels.sort((left, right) -> buySide
                     ? Long.compare(right.price, left.price)
                     : Long.compare(left.price, right.price));
