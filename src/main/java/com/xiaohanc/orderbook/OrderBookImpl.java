@@ -127,6 +127,7 @@ public class OrderBookImpl implements OrderBook {
         private final boolean buySide;
         private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>(256, 0.5f);
         private PriceLevel[] heap = new PriceLevel[INITIAL_HEAP_CAPACITY];
+        private long[] heapPrices = new long[INITIAL_HEAP_CAPACITY];
         private int heapSize;
 
         private SideBook(boolean buySide) {
@@ -167,9 +168,13 @@ public class OrderBookImpl implements OrderBook {
                 PriceLevel[] expanded = new PriceLevel[heap.length << 1];
                 System.arraycopy(heap, 0, expanded, 0, heap.length);
                 heap = expanded;
+                long[] expandedPrices = new long[heapPrices.length << 1];
+                System.arraycopy(heapPrices, 0, expandedPrices, 0, heapPrices.length);
+                heapPrices = expandedPrices;
             }
 
             heap[heapSize] = level;
+            heapPrices[heapSize] = level.price;
             level.heapIndex = heapSize;
             siftUp(heapSize++);
         }
@@ -178,7 +183,9 @@ public class OrderBookImpl implements OrderBook {
             int lastIndex = --heapSize;
             PriceLevel removed = heap[index];
             PriceLevel replacement = heap[lastIndex];
+            long replacementPrice = heapPrices[lastIndex];
             heap[lastIndex] = null;
+            heapPrices[lastIndex] = 0L;
             removed.heapIndex = -1;
 
             if (index == lastIndex) {
@@ -186,8 +193,9 @@ public class OrderBookImpl implements OrderBook {
             }
 
             heap[index] = replacement;
+            heapPrices[index] = replacementPrice;
             replacement.heapIndex = index;
-            if (index > 0 && better(heap[index], heap[(index - 1) / HEAP_ARITY])) {
+            if (index > 0 && better(heapPrices[index], heapPrices[(index - 1) / HEAP_ARITY])) {
                 siftUp(index);
             } else {
                 siftDown(index);
@@ -197,7 +205,7 @@ public class OrderBookImpl implements OrderBook {
         private void siftUp(int index) {
             while (index > 0) {
                 int parent = (index - 1) / HEAP_ARITY;
-                if (!better(heap[index], heap[parent])) {
+                if (!better(heapPrices[index], heapPrices[parent])) {
                     return;
                 }
                 swap(index, parent);
@@ -215,12 +223,12 @@ public class OrderBookImpl implements OrderBook {
                 int bestChild = firstChild;
                 int childLimit = Math.min(firstChild + HEAP_ARITY, heapSize);
                 for (int child = firstChild + 1; child < childLimit; child++) {
-                    if (better(heap[child], heap[bestChild])) {
+                    if (better(heapPrices[child], heapPrices[bestChild])) {
                         bestChild = child;
                     }
                 }
 
-                if (!better(heap[bestChild], heap[index])) {
+                if (!better(heapPrices[bestChild], heapPrices[index])) {
                     return;
                 }
 
@@ -229,15 +237,19 @@ public class OrderBookImpl implements OrderBook {
             }
         }
 
-        private boolean better(PriceLevel left, PriceLevel right) {
-            return buySide ? left.price > right.price : left.price < right.price;
+        private boolean better(long leftPrice, long rightPrice) {
+            return buySide ? leftPrice > rightPrice : leftPrice < rightPrice;
         }
 
         private void swap(int left, int right) {
             PriceLevel leftLevel = heap[left];
             PriceLevel rightLevel = heap[right];
+            long leftPrice = heapPrices[left];
+            long rightPrice = heapPrices[right];
             heap[left] = rightLevel;
             heap[right] = leftLevel;
+            heapPrices[left] = rightPrice;
+            heapPrices[right] = leftPrice;
             leftLevel.heapIndex = right;
             rightLevel.heapIndex = left;
         }
