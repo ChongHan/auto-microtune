@@ -26,9 +26,7 @@ public class OrderBookImpl implements OrderBook {
         SideBook book = side == Order.Side.BUY ? bids : asks;
         PriceLevel level = book.level(price);
         if (level == null) {
-            level = book.addLevel(price, id, remainingQuantity);
-            orderById.put(id, level);
-            return;
+            level = book.addLevel(price);
         }
 
         RestingOrder order = new RestingOrder(id, remainingQuantity, level);
@@ -79,7 +77,7 @@ public class OrderBookImpl implements OrderBook {
             }
 
             long matchedPrice = level.price;
-            RestingOrder maker = level;
+            RestingOrder maker = level.head;
             while (maker != null && remainingQuantity > 0) {
                 RestingOrder nextMaker = maker.next;
                 long matchedQuantity = Math.min(remainingQuantity, maker.quantity);
@@ -90,10 +88,6 @@ public class OrderBookImpl implements OrderBook {
                 if (maker.quantity == 0) {
                     orderById.remove(maker.id);
                     removeOrder(maker);
-                    if (maker == level) {
-                        maker = level.isEmpty() ? null : level;
-                        continue;
-                    }
                 }
                 maker = nextMaker;
             }
@@ -110,20 +104,7 @@ public class OrderBookImpl implements OrderBook {
 
     private void removeOrder(RestingOrder order) {
         PriceLevel level = order.level;
-        if (order == level) {
-            RestingOrder next = order.next;
-            if (next == null) {
-                level.resetSingleton();
-                level.book.removeLevel(level);
-                return;
-            }
-
-            level.promote(next);
-            orderById.put(level.id, level);
-            return;
-        }
-
-        level.unlinkNonHead(order);
+        level.unlink(order);
         if (level.isEmpty()) {
             level.book.removeLevel(level);
         }
@@ -134,7 +115,7 @@ public class OrderBookImpl implements OrderBook {
         List<Order> orders = new ArrayList<>(orderById.size());
         for (PriceLevel level : levels) {
             long price = level.price;
-            for (RestingOrder order = level; order != null; order = order.next) {
+            for (RestingOrder order = level.head; order != null; order = order.next) {
                 orders.add(new Order(order.id, level.book.side(), price, order.quantity));
             }
         }
@@ -158,8 +139,8 @@ public class OrderBookImpl implements OrderBook {
             return levels.get(price);
         }
 
-        private PriceLevel addLevel(long price, long orderId, long quantity) {
-            PriceLevel level = new PriceLevel(this, price, orderId, quantity);
+        private PriceLevel addLevel(long price) {
+            PriceLevel level = new PriceLevel(this, price);
             levels.put(price, level);
             push(level);
             return level;
@@ -571,30 +552,38 @@ public class OrderBookImpl implements OrderBook {
         }
     }
 
-    private static final class PriceLevel extends RestingOrder {
+    private static final class PriceLevel {
         private final SideBook book;
         private final long price;
         private int heapIndex = -1;
+        private RestingOrder head;
         private RestingOrder tail;
 
-        private PriceLevel(SideBook book, long price, long id, long quantity) {
-            super(id, quantity, null);
+        private PriceLevel(SideBook book, long price) {
             this.book = book;
             this.price = price;
-            this.level = this;
-            this.tail = this;
         }
 
         private void append(RestingOrder order) {
+            if (tail == null) {
+                head = order;
+                tail = order;
+                return;
+            }
+
             tail.next = order;
             order.prev = tail;
             tail = order;
         }
 
-        private void unlinkNonHead(RestingOrder order) {
+        private void unlink(RestingOrder order) {
             RestingOrder prev = order.prev;
             RestingOrder next = order.next;
-            prev.next = next;
+            if (prev == null) {
+                head = next;
+            } else {
+                prev.next = next;
+            }
             if (next == null) {
                 tail = prev;
             } else {
@@ -605,37 +594,16 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private boolean isEmpty() {
-            return tail == null;
-        }
-
-        private void promote(RestingOrder order) {
-            id = order.id;
-            quantity = order.quantity;
-            next = order.next;
-            if (next == null) {
-                tail = this;
-            } else {
-                next.prev = this;
-            }
-            order.prev = null;
-            order.next = null;
-        }
-
-        private void resetSingleton() {
-            id = 0;
-            quantity = 0;
-            prev = null;
-            next = null;
-            tail = null;
+            return head == null;
         }
     }
 
-    private static class RestingOrder {
-        long id;
-        long quantity;
-        PriceLevel level;
-        RestingOrder prev;
-        RestingOrder next;
+    private static final class RestingOrder {
+        private final long id;
+        private long quantity;
+        private final PriceLevel level;
+        private RestingOrder prev;
+        private RestingOrder next;
 
         private RestingOrder(long id, long quantity, PriceLevel level) {
             this.id = id;
