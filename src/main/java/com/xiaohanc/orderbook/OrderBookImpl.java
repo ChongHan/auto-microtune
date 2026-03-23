@@ -10,21 +10,20 @@ import java.util.Objects;
 public class OrderBookImpl implements OrderBook {
     private static final int NO_INDEX = -1;
     private static final byte BUY_SIDE = 1;
-    private static final int INITIAL_ORDER_CAPACITY = 16384;
 
     private final SideBook bids = new SideBook(true);
     private final SideBook asks = new SideBook(false);
     private final LongIntMap orderById = new LongIntMap(16384, 0.6f, NO_INDEX);
     private final OrderMatchListener listener;
 
-    private long[] orderIds = new long[INITIAL_ORDER_CAPACITY];
-    private long[] orderQuantities = new long[INITIAL_ORDER_CAPACITY];
-    private int[] orderLevels = filledIntArray(INITIAL_ORDER_CAPACITY, NO_INDEX);
-    private int[] orderPrev = filledIntArray(INITIAL_ORDER_CAPACITY, NO_INDEX);
-    private int[] orderNext = filledIntArray(INITIAL_ORDER_CAPACITY, NO_INDEX);
-    private int[] orderMapSlots = filledIntArray(INITIAL_ORDER_CAPACITY, NO_INDEX);
-    private byte[] orderSides = new byte[INITIAL_ORDER_CAPACITY];
-    private int orderCapacity = INITIAL_ORDER_CAPACITY;
+    private long[] orderIds = new long[1024];
+    private long[] orderQuantities = new long[1024];
+    private int[] orderLevels = filledIntArray(1024, NO_INDEX);
+    private int[] orderPrev = filledIntArray(1024, NO_INDEX);
+    private int[] orderNext = filledIntArray(1024, NO_INDEX);
+    private int[] orderMapSlots = filledIntArray(1024, NO_INDEX);
+    private byte[] orderSides = new byte[1024];
+    private int orderCapacity = 1024;
     private int nextOrderSlot;
     private int freeOrderSlot = NO_INDEX;
 
