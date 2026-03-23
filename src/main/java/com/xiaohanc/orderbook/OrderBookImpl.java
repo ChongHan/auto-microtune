@@ -51,7 +51,7 @@ public class OrderBookImpl implements OrderBook {
             throw new NoSuchElementException("Order ID not found: " + id);
         }
 
-        Order.Side side = order.level.book.side();
+        Order.Side side = order.level.buySide ? Order.Side.BUY : Order.Side.SELL;
         cancelOrder(id);
         addOrder(id, side, newPrice, newQuantity);
     }
@@ -106,7 +106,7 @@ public class OrderBookImpl implements OrderBook {
         PriceLevel level = order.level;
         level.unlink(order);
         if (level.isEmpty()) {
-            level.book.removeLevel(level);
+            (level.buySide ? bids : asks).removeLevel(level);
         }
     }
 
@@ -115,8 +115,9 @@ public class OrderBookImpl implements OrderBook {
         List<Order> orders = new ArrayList<>(orderById.size());
         for (PriceLevel level : levels) {
             long price = level.price;
+            Order.Side side = level.buySide ? Order.Side.BUY : Order.Side.SELL;
             for (RestingOrder order = level.head; order != null; order = order.next) {
-                orders.add(new Order(order.id, level.book.side(), price, order.quantity));
+                orders.add(new Order(order.id, side, price, order.quantity));
             }
         }
         return Collections.unmodifiableList(orders);
@@ -140,7 +141,7 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private PriceLevel addLevel(long price) {
-            PriceLevel level = new PriceLevel(this, price);
+            PriceLevel level = new PriceLevel(buySide, price);
             levels.put(price, level);
             push(level);
             return level;
@@ -242,10 +243,6 @@ public class OrderBookImpl implements OrderBook {
             heap[right] = leftLevel;
             leftLevel.heapIndex = right;
             rightLevel.heapIndex = left;
-        }
-
-        private Order.Side side() {
-            return buySide ? Order.Side.BUY : Order.Side.SELL;
         }
     }
 
@@ -553,14 +550,14 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private static final class PriceLevel {
-        private final SideBook book;
+        private final boolean buySide;
         private final long price;
         private int heapIndex = -1;
         private RestingOrder head;
         private RestingOrder tail;
 
-        private PriceLevel(SideBook book, long price) {
-            this.book = book;
+        private PriceLevel(boolean buySide, long price) {
+            this.buySide = buySide;
             this.price = price;
         }
 
