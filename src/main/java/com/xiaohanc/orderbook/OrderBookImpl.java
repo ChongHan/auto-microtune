@@ -125,7 +125,7 @@ public class OrderBookImpl implements OrderBook {
         private static final int HEAP_ARITY = 4;
 
         private final boolean buySide;
-        private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>(256, 0.6f);
+        private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>(256, 0.5f);
         private PriceLevel[] heap = new PriceLevel[INITIAL_HEAP_CAPACITY];
         private int heapSize;
 
