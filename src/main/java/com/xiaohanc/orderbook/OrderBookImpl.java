@@ -7,8 +7,8 @@ import java.util.NoSuchElementException;
 import java.util.Objects;
 
 public class OrderBookImpl implements OrderBook {
-    private final SideBook bids = new SideBook(Order.Side.BUY);
-    private final SideBook asks = new SideBook(Order.Side.SELL);
+    private final SideBook bids = new SideBook(true);
+    private final SideBook asks = new SideBook(false);
     private final LongOrderMap orderById = new LongOrderMap(16384);
     private final OrderMatchListener listener;
 
@@ -51,7 +51,7 @@ public class OrderBookImpl implements OrderBook {
             throw new NoSuchElementException("Order ID not found: " + id);
         }
 
-        Order.Side side = order.level.page.book.side;
+        Order.Side side = order.level.book.side();
         cancelOrder(id);
         addOrder(id, side, newPrice, newQuantity);
     }
@@ -106,107 +106,80 @@ public class OrderBookImpl implements OrderBook {
         PriceLevel level = order.level;
         level.unlink(order);
         if (level.isEmpty()) {
-            level.page.book.removeLevel(level);
+            level.book.removeLevel(level);
         }
     }
 
     private List<Order> snapshot(SideBook book) {
         List<PriceLevel> levels = book.snapshotLevels();
         List<Order> orders = new ArrayList<>(orderById.size());
-        Order.Side side = book.side;
         for (PriceLevel level : levels) {
             long price = level.price;
             for (RestingOrder order = level.head; order != null; order = order.next) {
-                orders.add(new Order(order.id, side, price, order.quantity));
+                orders.add(new Order(order.id, level.book.side(), price, order.quantity));
             }
         }
         return Collections.unmodifiableList(orders);
     }
 
     private static final class SideBook {
-        private static final int PAGE_SHIFT = 8;
-        private static final int PAGE_SIZE = 1 << PAGE_SHIFT;
-        private static final int PAGE_MASK = PAGE_SIZE - 1;
-        private static final int INITIAL_HEAP_CAPACITY = 64;
+        private static final int INITIAL_HEAP_CAPACITY = 256;
         private static final int HEAP_ARITY = 5;
 
-        private final Order.Side side;
         private final boolean buySide;
-        private final LongObjectMap<PricePage> pages = new LongObjectMap<>(64, 0.5f);
-        private PricePage[] heap = new PricePage[INITIAL_HEAP_CAPACITY];
+        private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>(256, 0.5f);
+        private PriceLevel[] heap = new PriceLevel[INITIAL_HEAP_CAPACITY];
         private int heapSize;
 
-        private SideBook(Order.Side side) {
-            this.side = side;
-            this.buySide = side == Order.Side.BUY;
+        private SideBook(boolean buySide) {
+            this.buySide = buySide;
         }
 
         private PriceLevel level(long price) {
-            PricePage page = pages.get(pageKey(price));
-            return page == null ? null : page.levels[pageIndex(price)];
+            return levels.get(price);
         }
 
         private PriceLevel addLevel(long price) {
-            long pageKey = pageKey(price);
-            PricePage page = pages.get(pageKey);
-            if (page == null) {
-                page = new PricePage(this, pageKey);
-                pages.put(pageKey, page);
-                push(page);
-            }
-
-            int levelIndex = pageIndex(price);
-            PriceLevel level = new PriceLevel(page, price);
-            page.levels[levelIndex] = level;
-            page.setOccupied(levelIndex);
+            PriceLevel level = new PriceLevel(this, price);
+            levels.put(price, level);
+            push(level);
             return level;
         }
 
         private PriceLevel best() {
-            return heapSize == 0 ? null : heap[0].bestLevel();
+            return heapSize == 0 ? null : heap[0];
         }
 
         private void removeLevel(PriceLevel level) {
-            PricePage page = level.page;
-            int levelIndex = pageIndex(level.price);
-            page.levels[levelIndex] = null;
-            page.clearOccupied(levelIndex);
-            if (page.isEmpty()) {
-                pages.remove(page.pageKey);
-                removeAt(page.heapIndex);
-            }
+            levels.remove(level.price);
+            removeAt(level.heapIndex);
         }
 
         private List<PriceLevel> snapshotLevels() {
-            List<PricePage> pageSnapshot = new ArrayList<>(pages.size());
-            pages.addValuesTo(pageSnapshot);
-
-            List<PriceLevel> orderedLevels = new ArrayList<>(pageSnapshot.size() << 2);
-            for (PricePage page : pageSnapshot) {
-                page.addLevelsTo(orderedLevels);
-            }
+            List<PriceLevel> orderedLevels = new ArrayList<>(levels.size());
+            levels.addValuesTo(orderedLevels);
             orderedLevels.sort((left, right) -> buySide
                     ? Long.compare(right.price, left.price)
                     : Long.compare(left.price, right.price));
             return orderedLevels;
         }
 
-        private void push(PricePage page) {
+        private void push(PriceLevel level) {
             if (heapSize == heap.length) {
-                PricePage[] expanded = new PricePage[heap.length << 1];
+                PriceLevel[] expanded = new PriceLevel[heap.length << 1];
                 System.arraycopy(heap, 0, expanded, 0, heap.length);
                 heap = expanded;
             }
 
-            heap[heapSize] = page;
-            page.heapIndex = heapSize;
+            heap[heapSize] = level;
+            level.heapIndex = heapSize;
             siftUp(heapSize++);
         }
 
         private void removeAt(int index) {
             int lastIndex = --heapSize;
-            PricePage removed = heap[index];
-            PricePage replacement = heap[lastIndex];
+            PriceLevel removed = heap[index];
+            PriceLevel replacement = heap[lastIndex];
             heap[lastIndex] = null;
             removed.heapIndex = -1;
 
@@ -216,8 +189,7 @@ public class OrderBookImpl implements OrderBook {
 
             heap[index] = replacement;
             replacement.heapIndex = index;
-            int parent = (index - 1) / HEAP_ARITY;
-            if (index > 0 && better(replacement, heap[parent])) {
+            if (index > 0 && better(heap[index], heap[(index - 1) / HEAP_ARITY])) {
                 siftUp(index);
             } else {
                 siftDown(index);
@@ -259,25 +231,21 @@ public class OrderBookImpl implements OrderBook {
             }
         }
 
-        private boolean better(PricePage left, PricePage right) {
-            return buySide ? left.pageKey > right.pageKey : left.pageKey < right.pageKey;
+        private boolean better(PriceLevel left, PriceLevel right) {
+            return buySide ? left.price > right.price : left.price < right.price;
         }
 
         private void swap(int left, int right) {
-            PricePage leftPage = heap[left];
-            PricePage rightPage = heap[right];
-            heap[left] = rightPage;
-            heap[right] = leftPage;
-            leftPage.heapIndex = right;
-            rightPage.heapIndex = left;
+            PriceLevel leftLevel = heap[left];
+            PriceLevel rightLevel = heap[right];
+            heap[left] = rightLevel;
+            heap[right] = leftLevel;
+            leftLevel.heapIndex = right;
+            rightLevel.heapIndex = left;
         }
 
-        private long pageKey(long price) {
-            return price >> PAGE_SHIFT;
-        }
-
-        private int pageIndex(long price) {
-            return (int) (price & PAGE_MASK);
+        private Order.Side side() {
+            return buySide ? Order.Side.BUY : Order.Side.SELL;
         }
     }
 
@@ -584,104 +552,15 @@ public class OrderBookImpl implements OrderBook {
         }
     }
 
-    private static final class PricePage {
-        private final SideBook book;
-        private final long pageKey;
-        private final PriceLevel[] levels = new PriceLevel[SideBook.PAGE_SIZE];
-        private int heapIndex = -1;
-        private long occupied0;
-        private long occupied1;
-        private long occupied2;
-        private long occupied3;
-
-        private PricePage(SideBook book, long pageKey) {
-            this.book = book;
-            this.pageKey = pageKey;
-        }
-
-        private PriceLevel bestLevel() {
-            if (book.buySide) {
-                if (occupied3 != 0) {
-                    return levels[192 + highestBit(occupied3)];
-                }
-                if (occupied2 != 0) {
-                    return levels[128 + highestBit(occupied2)];
-                }
-                if (occupied1 != 0) {
-                    return levels[64 + highestBit(occupied1)];
-                }
-                return levels[highestBit(occupied0)];
-            }
-
-            if (occupied0 != 0) {
-                return levels[lowestBit(occupied0)];
-            }
-            if (occupied1 != 0) {
-                return levels[64 + lowestBit(occupied1)];
-            }
-            if (occupied2 != 0) {
-                return levels[128 + lowestBit(occupied2)];
-            }
-            return levels[192 + lowestBit(occupied3)];
-        }
-
-        private void addLevelsTo(List<PriceLevel> out) {
-            addLevelsTo(out, occupied0, 0);
-            addLevelsTo(out, occupied1, 64);
-            addLevelsTo(out, occupied2, 128);
-            addLevelsTo(out, occupied3, 192);
-        }
-
-        private void setOccupied(int index) {
-            long bit = 1L << (index & 63);
-            switch (index >>> 6) {
-                case 0 -> occupied0 |= bit;
-                case 1 -> occupied1 |= bit;
-                case 2 -> occupied2 |= bit;
-                default -> occupied3 |= bit;
-            }
-        }
-
-        private void clearOccupied(int index) {
-            long bit = ~(1L << (index & 63));
-            switch (index >>> 6) {
-                case 0 -> occupied0 &= bit;
-                case 1 -> occupied1 &= bit;
-                case 2 -> occupied2 &= bit;
-                default -> occupied3 &= bit;
-            }
-        }
-
-        private boolean isEmpty() {
-            return (occupied0 | occupied1 | occupied2 | occupied3) == 0;
-        }
-
-        private void addLevelsTo(List<PriceLevel> out, long occupiedWord, int baseIndex) {
-            long occupied = occupiedWord;
-            while (occupied != 0) {
-                int bitIndex = Long.numberOfTrailingZeros(occupied);
-                out.add(levels[baseIndex + bitIndex]);
-                occupied &= occupied - 1;
-            }
-        }
-
-        private int highestBit(long word) {
-            return 63 - Long.numberOfLeadingZeros(word);
-        }
-
-        private int lowestBit(long word) {
-            return Long.numberOfTrailingZeros(word);
-        }
-    }
-
     private static final class PriceLevel {
-        private final PricePage page;
+        private final SideBook book;
         private final long price;
+        private int heapIndex = -1;
         private RestingOrder head;
         private RestingOrder tail;
 
-        private PriceLevel(PricePage page, long price) {
-            this.page = page;
+        private PriceLevel(SideBook book, long price) {
+            this.book = book;
             this.price = price;
         }
 
