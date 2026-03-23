@@ -249,7 +249,6 @@ public class OrderBookImpl implements OrderBook {
 
     private static final class LongObjectMap<V> {
         private static final int DEFAULT_CAPACITY = 16;
-        private static final int BUCKET_SIZE = 4;
 
         private long[] keys;
         private Object[] values;
@@ -266,53 +265,28 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private LongObjectMap(int capacity, float loadFactor) {
-            int buckets = 1;
-            int minCapacity = Math.max(capacity, DEFAULT_CAPACITY);
-            while (buckets * BUCKET_SIZE < minCapacity) {
-                buckets <<= 1;
+            int actualCapacity = 1;
+            while (actualCapacity < capacity) {
+                actualCapacity <<= 1;
             }
             this.loadFactor = loadFactor;
-            keys = new long[buckets * BUCKET_SIZE];
-            values = new Object[buckets * BUCKET_SIZE];
-            resizeThreshold = (int) (values.length * loadFactor);
+            keys = new long[actualCapacity];
+            values = new Object[actualCapacity];
+            resizeThreshold = (int) (actualCapacity * loadFactor);
         }
 
         private V get(long key) {
-            int index = bucketStart(key);
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
             while (true) {
-                Object value0 = values[index];
-                if (value0 == null) {
+                Object value = values[index];
+                if (value == null) {
                     return null;
                 }
                 if (keys[index] == key) {
                     return valueAt(index);
                 }
-
-                Object value1 = values[index + 1];
-                if (value1 == null) {
-                    return null;
-                }
-                if (keys[index + 1] == key) {
-                    return valueAt(index + 1);
-                }
-
-                Object value2 = values[index + 2];
-                if (value2 == null) {
-                    return null;
-                }
-                if (keys[index + 2] == key) {
-                    return valueAt(index + 2);
-                }
-
-                Object value3 = values[index + 3];
-                if (value3 == null) {
-                    return null;
-                }
-                if (keys[index + 3] == key) {
-                    return valueAt(index + 3);
-                }
-
-                index = nextBucket(index);
+                index = (index + 1) & mask;
             }
         }
 
@@ -321,10 +295,11 @@ public class OrderBookImpl implements OrderBook {
                 resize();
             }
 
-            int index = bucketStart(key);
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
             while (true) {
-                Object current0 = values[index];
-                if (current0 == null) {
+                Object current = values[index];
+                if (current == null) {
                     keys[index] = key;
                     values[index] = value;
                     size++;
@@ -335,55 +310,16 @@ public class OrderBookImpl implements OrderBook {
                     values[index] = value;
                     return previous;
                 }
-
-                Object current1 = values[index + 1];
-                if (current1 == null) {
-                    keys[index + 1] = key;
-                    values[index + 1] = value;
-                    size++;
-                    return null;
-                }
-                if (keys[index + 1] == key) {
-                    V previous = valueAt(index + 1);
-                    values[index + 1] = value;
-                    return previous;
-                }
-
-                Object current2 = values[index + 2];
-                if (current2 == null) {
-                    keys[index + 2] = key;
-                    values[index + 2] = value;
-                    size++;
-                    return null;
-                }
-                if (keys[index + 2] == key) {
-                    V previous = valueAt(index + 2);
-                    values[index + 2] = value;
-                    return previous;
-                }
-
-                Object current3 = values[index + 3];
-                if (current3 == null) {
-                    keys[index + 3] = key;
-                    values[index + 3] = value;
-                    size++;
-                    return null;
-                }
-                if (keys[index + 3] == key) {
-                    V previous = valueAt(index + 3);
-                    values[index + 3] = value;
-                    return previous;
-                }
-
-                index = nextBucket(index);
+                index = (index + 1) & mask;
             }
         }
 
         private V remove(long key) {
-            int index = bucketStart(key);
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
             while (true) {
-                Object current0 = values[index];
-                if (current0 == null) {
+                Object current = values[index];
+                if (current == null) {
                     return null;
                 }
                 if (keys[index] == key) {
@@ -391,38 +327,7 @@ public class OrderBookImpl implements OrderBook {
                     deleteIndex(index);
                     return removed;
                 }
-
-                Object current1 = values[index + 1];
-                if (current1 == null) {
-                    return null;
-                }
-                if (keys[index + 1] == key) {
-                    V removed = valueAt(index + 1);
-                    deleteIndex(index + 1);
-                    return removed;
-                }
-
-                Object current2 = values[index + 2];
-                if (current2 == null) {
-                    return null;
-                }
-                if (keys[index + 2] == key) {
-                    V removed = valueAt(index + 2);
-                    deleteIndex(index + 2);
-                    return removed;
-                }
-
-                Object current3 = values[index + 3];
-                if (current3 == null) {
-                    return null;
-                }
-                if (keys[index + 3] == key) {
-                    V removed = valueAt(index + 3);
-                    deleteIndex(index + 3);
-                    return removed;
-                }
-
-                index = nextBucket(index);
+                index = (index + 1) & mask;
             }
         }
 
@@ -439,17 +344,24 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private void deleteIndex(int index) {
+            int mask = values.length - 1;
             size--;
-            values[index] = null;
-
-            int next = nextIndex(index);
-            while (values[next] != null) {
-                long key = keys[next];
+            int gap = index;
+            int next = (index + 1) & mask;
+            while (true) {
                 Object value = values[next];
-                values[next] = null;
-                size--;
-                reinsert(key, value);
-                next = nextIndex(next);
+                if (value == null) {
+                    values[gap] = null;
+                    return;
+                }
+
+                int home = mix(keys[next]) & mask;
+                if (((next - home) & mask) >= ((gap - home) & mask)) {
+                    keys[gap] = keys[next];
+                    values[gap] = value;
+                    gap = next;
+                }
+                next = (next + 1) & mask;
             }
         }
 
@@ -472,59 +384,20 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private void reinsert(long key, Object value) {
-            insertRehashed(key, value);
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
+            while (values[index] != null) {
+                index = (index + 1) & mask;
+            }
+            keys[index] = key;
+            values[index] = value;
+            size++;
         }
 
         private int mix(long key) {
             long mixed = key ^ (key >>> 33);
             mixed ^= mixed >>> 17;
             return (int) mixed;
-        }
-
-        private int bucketStart(long key) {
-            int bucketMask = (values.length / BUCKET_SIZE) - 1;
-            return (mix(key) & bucketMask) * BUCKET_SIZE;
-        }
-
-        private int nextBucket(int index) {
-            index += BUCKET_SIZE;
-            return index == values.length ? 0 : index;
-        }
-
-        private int nextIndex(int index) {
-            index++;
-            return index == values.length ? 0 : index;
-        }
-
-        private void insertRehashed(long key, Object value) {
-            int index = bucketStart(key);
-            while (true) {
-                if (values[index] == null) {
-                    keys[index] = key;
-                    values[index] = value;
-                    size++;
-                    return;
-                }
-                if (values[index + 1] == null) {
-                    keys[index + 1] = key;
-                    values[index + 1] = value;
-                    size++;
-                    return;
-                }
-                if (values[index + 2] == null) {
-                    keys[index + 2] = key;
-                    values[index + 2] = value;
-                    size++;
-                    return;
-                }
-                if (values[index + 3] == null) {
-                    keys[index + 3] = key;
-                    values[index + 3] = value;
-                    size++;
-                    return;
-                }
-                index = nextBucket(index);
-            }
         }
 
         @SuppressWarnings("unchecked")
@@ -539,8 +412,6 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private static final class LongOrderMap {
-        private static final int BUCKET_SIZE = 4;
-
         private long[] keys;
         private RestingOrder[] values;
         private int size;
@@ -552,14 +423,14 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private LongOrderMap(int capacity, float loadFactor) {
-            int buckets = 1;
-            while (buckets * BUCKET_SIZE < capacity) {
-                buckets <<= 1;
+            int actualCapacity = 1;
+            while (actualCapacity < capacity) {
+                actualCapacity <<= 1;
             }
             this.loadFactor = loadFactor;
-            keys = new long[buckets * BUCKET_SIZE];
-            values = new RestingOrder[buckets * BUCKET_SIZE];
-            resizeThreshold = (int) (values.length * loadFactor);
+            keys = new long[actualCapacity];
+            values = new RestingOrder[actualCapacity];
+            resizeThreshold = (int) (actualCapacity * loadFactor);
         }
 
         private int size() {
@@ -567,41 +438,17 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private RestingOrder get(long key) {
-            int index = bucketStart(key);
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
             while (true) {
-                RestingOrder value0 = values[index];
-                if (value0 == null) {
+                RestingOrder value = values[index];
+                if (value == null) {
                     return null;
                 }
                 if (keys[index] == key) {
-                    return value0;
+                    return value;
                 }
-
-                RestingOrder value1 = values[index + 1];
-                if (value1 == null) {
-                    return null;
-                }
-                if (keys[index + 1] == key) {
-                    return value1;
-                }
-
-                RestingOrder value2 = values[index + 2];
-                if (value2 == null) {
-                    return null;
-                }
-                if (keys[index + 2] == key) {
-                    return value2;
-                }
-
-                RestingOrder value3 = values[index + 3];
-                if (value3 == null) {
-                    return null;
-                }
-                if (keys[index + 3] == key) {
-                    return value3;
-                }
-
-                index = nextBucket(index);
+                index = (index + 1) & mask;
             }
         }
 
@@ -610,10 +457,11 @@ public class OrderBookImpl implements OrderBook {
                 resize();
             }
 
-            int index = bucketStart(key);
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
             while (true) {
-                RestingOrder current0 = values[index];
-                if (current0 == null) {
+                RestingOrder current = values[index];
+                if (current == null) {
                     keys[index] = key;
                     values[index] = value;
                     size++;
@@ -621,108 +469,48 @@ public class OrderBookImpl implements OrderBook {
                 }
                 if (keys[index] == key) {
                     values[index] = value;
-                    return current0;
+                    return current;
                 }
-
-                RestingOrder current1 = values[index + 1];
-                if (current1 == null) {
-                    keys[index + 1] = key;
-                    values[index + 1] = value;
-                    size++;
-                    return null;
-                }
-                if (keys[index + 1] == key) {
-                    values[index + 1] = value;
-                    return current1;
-                }
-
-                RestingOrder current2 = values[index + 2];
-                if (current2 == null) {
-                    keys[index + 2] = key;
-                    values[index + 2] = value;
-                    size++;
-                    return null;
-                }
-                if (keys[index + 2] == key) {
-                    values[index + 2] = value;
-                    return current2;
-                }
-
-                RestingOrder current3 = values[index + 3];
-                if (current3 == null) {
-                    keys[index + 3] = key;
-                    values[index + 3] = value;
-                    size++;
-                    return null;
-                }
-                if (keys[index + 3] == key) {
-                    values[index + 3] = value;
-                    return current3;
-                }
-
-                index = nextBucket(index);
+                index = (index + 1) & mask;
             }
         }
 
         private RestingOrder remove(long key) {
-            int index = bucketStart(key);
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
             while (true) {
-                RestingOrder current0 = values[index];
-                if (current0 == null) {
+                RestingOrder current = values[index];
+                if (current == null) {
                     return null;
                 }
                 if (keys[index] == key) {
-                    RestingOrder removed = current0;
+                    RestingOrder removed = current;
                     deleteIndex(index);
                     return removed;
                 }
-
-                RestingOrder current1 = values[index + 1];
-                if (current1 == null) {
-                    return null;
-                }
-                if (keys[index + 1] == key) {
-                    RestingOrder removed = current1;
-                    deleteIndex(index + 1);
-                    return removed;
-                }
-
-                RestingOrder current2 = values[index + 2];
-                if (current2 == null) {
-                    return null;
-                }
-                if (keys[index + 2] == key) {
-                    RestingOrder removed = current2;
-                    deleteIndex(index + 2);
-                    return removed;
-                }
-
-                RestingOrder current3 = values[index + 3];
-                if (current3 == null) {
-                    return null;
-                }
-                if (keys[index + 3] == key) {
-                    RestingOrder removed = current3;
-                    deleteIndex(index + 3);
-                    return removed;
-                }
-
-                index = nextBucket(index);
+                index = (index + 1) & mask;
             }
         }
 
         private void deleteIndex(int index) {
+            int mask = values.length - 1;
             size--;
-            values[index] = null;
-
-            int next = nextIndex(index);
-            while (values[next] != null) {
-                long key = keys[next];
+            int gap = index;
+            int next = (index + 1) & mask;
+            while (true) {
                 RestingOrder value = values[next];
-                values[next] = null;
-                size--;
-                reinsert(key, value);
-                next = nextIndex(next);
+                if (value == null) {
+                    values[gap] = null;
+                    return;
+                }
+
+                int home = mix(keys[next]) & mask;
+                if (((next - home) & mask) >= ((gap - home) & mask)) {
+                    keys[gap] = keys[next];
+                    values[gap] = value;
+                    gap = next;
+                }
+                next = (next + 1) & mask;
             }
         }
 
@@ -745,59 +533,20 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private void reinsert(long key, RestingOrder value) {
-            insertRehashed(key, value);
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
+            while (values[index] != null) {
+                index = (index + 1) & mask;
+            }
+            keys[index] = key;
+            values[index] = value;
+            size++;
         }
 
         private int mix(long key) {
             long mixed = key ^ (key >>> 33);
             mixed ^= mixed >>> 17;
             return (int) mixed;
-        }
-
-        private int bucketStart(long key) {
-            int bucketMask = (values.length / BUCKET_SIZE) - 1;
-            return (mix(key) & bucketMask) * BUCKET_SIZE;
-        }
-
-        private int nextBucket(int index) {
-            index += BUCKET_SIZE;
-            return index == values.length ? 0 : index;
-        }
-
-        private int nextIndex(int index) {
-            index++;
-            return index == values.length ? 0 : index;
-        }
-
-        private void insertRehashed(long key, RestingOrder value) {
-            int index = bucketStart(key);
-            while (true) {
-                if (values[index] == null) {
-                    keys[index] = key;
-                    values[index] = value;
-                    size++;
-                    return;
-                }
-                if (values[index + 1] == null) {
-                    keys[index + 1] = key;
-                    values[index + 1] = value;
-                    size++;
-                    return;
-                }
-                if (values[index + 2] == null) {
-                    keys[index + 2] = key;
-                    values[index + 2] = value;
-                    size++;
-                    return;
-                }
-                if (values[index + 3] == null) {
-                    keys[index + 3] = key;
-                    values[index + 3] = value;
-                    size++;
-                    return;
-                }
-                index = nextBucket(index);
-            }
         }
     }
 
