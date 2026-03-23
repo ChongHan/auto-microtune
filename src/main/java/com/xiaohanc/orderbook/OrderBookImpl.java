@@ -324,6 +324,9 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private void siftUp(int index) {
+            int[] heap = this.heap;
+            int[] levelHeapIndex = this.levelHeapIndex;
+            long[] levelKeys = this.levelKeys;
             int levelSlot = heap[index];
             long levelKey = levelKeys[levelSlot];
             while (index > 0) {
@@ -342,6 +345,10 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private void siftDown(int index) {
+            int[] heap = this.heap;
+            int[] levelHeapIndex = this.levelHeapIndex;
+            long[] levelKeys = this.levelKeys;
+            int heapSize = this.heapSize;
             int levelSlot = heap[index];
             long levelKey = levelKeys[levelSlot];
             while (true) {
@@ -352,12 +359,42 @@ public class OrderBookImpl implements OrderBook {
 
                 int bestChild = firstChild;
                 long bestChildKey = levelKeys[heap[firstChild]];
-                int childLimit = Math.min(firstChild + HEAP_ARITY, heapSize);
-                for (int child = firstChild + 1; child < childLimit; child++) {
-                    int childSlot = heap[child];
+                int secondChild = firstChild + 1;
+                if (secondChild < heapSize) {
+                    int childSlot = heap[secondChild];
                     long childKey = levelKeys[childSlot];
                     if (childKey < bestChildKey) {
-                        bestChild = child;
+                        bestChild = secondChild;
+                        bestChildKey = childKey;
+                    }
+                }
+
+                int thirdChild = firstChild + 2;
+                if (thirdChild < heapSize) {
+                    int childSlot = heap[thirdChild];
+                    long childKey = levelKeys[childSlot];
+                    if (childKey < bestChildKey) {
+                        bestChild = thirdChild;
+                        bestChildKey = childKey;
+                    }
+                }
+
+                int fourthChild = firstChild + 3;
+                if (fourthChild < heapSize) {
+                    int childSlot = heap[fourthChild];
+                    long childKey = levelKeys[childSlot];
+                    if (childKey < bestChildKey) {
+                        bestChild = fourthChild;
+                        bestChildKey = childKey;
+                    }
+                }
+
+                int fifthChild = firstChild + 4;
+                if (fifthChild < heapSize) {
+                    int childSlot = heap[fifthChild];
+                    long childKey = levelKeys[childSlot];
+                    if (childKey < bestChildKey) {
+                        bestChild = fifthChild;
                         bestChildKey = childKey;
                     }
                 }
