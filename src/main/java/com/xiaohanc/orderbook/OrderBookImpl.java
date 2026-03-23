@@ -32,7 +32,9 @@ public class OrderBookImpl implements OrderBook {
 
     @Override
     public void addOrder(long id, Order.Side side, long price, long quantity) {
-        long remainingQuantity = matchOrder(id, side, price, quantity);
+        long remainingQuantity = side == Order.Side.BUY
+                ? matchBuyOrder(id, price, quantity)
+                : matchSellOrder(id, price, quantity);
         if (remainingQuantity == 0) {
             return;
         }
@@ -85,8 +87,8 @@ public class OrderBookImpl implements OrderBook {
         return snapshot(asks);
     }
 
-    private long matchOrder(long incomingId, Order.Side incomingSide, long incomingPrice, long incomingQuantity) {
-        SideBook oppositeBook = incomingSide == Order.Side.BUY ? asks : bids;
+    private long matchBuyOrder(long incomingId, long incomingPrice, long incomingQuantity) {
+        SideBook oppositeBook = asks;
         long remainingQuantity = incomingQuantity;
 
         while (remainingQuantity > 0) {
@@ -96,7 +98,7 @@ public class OrderBookImpl implements OrderBook {
             }
 
             long matchedPrice = oppositeBook.levelPrices[levelSlot];
-            if (!crosses(incomingSide, incomingPrice, matchedPrice)) {
+            if (incomingPrice < matchedPrice) {
                 break;
             }
 
@@ -122,10 +124,41 @@ public class OrderBookImpl implements OrderBook {
         return remainingQuantity;
     }
 
-    private boolean crosses(Order.Side incomingSide, long incomingPrice, long restingPrice) {
-        return incomingSide == Order.Side.BUY
-                ? incomingPrice >= restingPrice
-                : incomingPrice <= restingPrice;
+    private long matchSellOrder(long incomingId, long incomingPrice, long incomingQuantity) {
+        SideBook oppositeBook = bids;
+        long remainingQuantity = incomingQuantity;
+
+        while (remainingQuantity > 0) {
+            int levelSlot = oppositeBook.bestLevel();
+            if (levelSlot == NO_INDEX) {
+                break;
+            }
+
+            long matchedPrice = oppositeBook.levelPrices[levelSlot];
+            if (incomingPrice > matchedPrice) {
+                break;
+            }
+
+            int makerSlot = oppositeBook.levelHeads[levelSlot];
+            while (makerSlot != NO_INDEX && remainingQuantity > 0) {
+                int nextMakerSlot = orderNext[makerSlot];
+                long matchedQuantity = Math.min(remainingQuantity, orderQuantities[makerSlot]);
+                listener.onMatch(orderIds[makerSlot], incomingId, matchedPrice, matchedQuantity);
+
+                remainingQuantity -= matchedQuantity;
+                long remainingMakerQuantity = orderQuantities[makerSlot] - matchedQuantity;
+                if (remainingMakerQuantity == 0) {
+                    orderById.removeValue(makerSlot, orderMapSlots);
+                    removeMatchedHead(oppositeBook, levelSlot, makerSlot, nextMakerSlot);
+                    releaseOrderSlot(makerSlot);
+                } else {
+                    orderQuantities[makerSlot] = remainingMakerQuantity;
+                }
+                makerSlot = nextMakerSlot;
+            }
+        }
+
+        return remainingQuantity;
     }
 
     private void removeOrder(int orderSlot) {
