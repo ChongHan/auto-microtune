@@ -36,14 +36,23 @@ public class OrderBookImpl implements OrderBook {
 
     @Override
     public void cancelOrder(long id) {
-        removeKnownOrder(removeTrackedOrder(id));
+        RestingOrder order = orderById.remove(id);
+        if (order == null) {
+            throw new NoSuchElementException("Order ID not found: " + id);
+        }
+
+        removeOrder(order);
     }
 
     @Override
     public void modifyOrder(long id, long newPrice, long newQuantity) {
-        RestingOrder order = removeTrackedOrder(id);
+        RestingOrder order = orderById.get(id);
+        if (order == null) {
+            throw new NoSuchElementException("Order ID not found: " + id);
+        }
+
         Order.Side side = order.side;
-        removeKnownOrder(order);
+        cancelOrder(id);
         addOrder(id, side, newPrice, newQuantity);
     }
 
@@ -98,18 +107,6 @@ public class OrderBookImpl implements OrderBook {
         if (level.isEmpty()) {
             level.book.removeLevel(level);
         }
-    }
-
-    private RestingOrder removeTrackedOrder(long id) {
-        RestingOrder order = orderById.remove(id);
-        if (order == null) {
-            throw new NoSuchElementException("Order ID not found: " + id);
-        }
-        return order;
-    }
-
-    private void removeKnownOrder(RestingOrder order) {
-        removeOrder(order);
     }
 
     private List<Order> snapshot(SideBook book) {
