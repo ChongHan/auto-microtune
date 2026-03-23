@@ -68,11 +68,15 @@ public class OrderBookImpl implements OrderBook {
 
     private long matchOrder(long incomingId, Order.Side incomingSide, long incomingPrice, long incomingQuantity) {
         SideBook oppositeBook = incomingSide == Order.Side.BUY ? asks : bids;
+        boolean buySide = incomingSide == Order.Side.BUY;
         long remainingQuantity = incomingQuantity;
 
         while (remainingQuantity > 0) {
             PriceLevel level = oppositeBook.best();
-            if (level == null || !crosses(incomingSide, incomingPrice, level.price)) {
+            if (level == null) {
+                break;
+            }
+            if (buySide ? incomingPrice < level.price : incomingPrice > level.price) {
                 break;
             }
 
@@ -93,12 +97,6 @@ public class OrderBookImpl implements OrderBook {
         }
 
         return remainingQuantity;
-    }
-
-    private boolean crosses(Order.Side incomingSide, long incomingPrice, long restingPrice) {
-        return incomingSide == Order.Side.BUY
-                ? incomingPrice >= restingPrice
-                : incomingPrice <= restingPrice;
     }
 
     private void removeOrder(RestingOrder order) {
