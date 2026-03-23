@@ -87,7 +87,7 @@ public class OrderBookImpl implements OrderBook {
                 maker.quantity -= matchedQuantity;
                 if (maker.quantity == 0) {
                     orderById.remove(maker.id);
-                    level.removeHead();
+                    removeOrder(maker);
                 }
                 maker = nextMaker;
             }
@@ -591,20 +591,6 @@ public class OrderBookImpl implements OrderBook {
             }
             order.prev = null;
             order.next = null;
-        }
-
-        private void removeHead() {
-            RestingOrder removed = head;
-            RestingOrder next = removed.next;
-            head = next;
-            if (next == null) {
-                tail = null;
-                book.removeLevel(this);
-            } else {
-                next.prev = null;
-            }
-            removed.prev = null;
-            removed.next = null;
         }
 
         private boolean isEmpty() {
