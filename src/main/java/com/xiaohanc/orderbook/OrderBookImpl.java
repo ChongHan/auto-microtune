@@ -432,7 +432,6 @@ public class OrderBookImpl implements OrderBook {
 
     private static final class LongIntMap {
         private long[] keys;
-        private int[] hashes;
         private int[] values;
         private int size;
         private final float loadFactor;
@@ -447,7 +446,6 @@ public class OrderBookImpl implements OrderBook {
             this.loadFactor = loadFactor;
             this.missingValue = missingValue;
             keys = new long[actualCapacity];
-            hashes = new int[actualCapacity];
             values = filledIntArray(actualCapacity, missingValue);
             resizeThreshold = (int) (actualCapacity * loadFactor);
         }
@@ -458,14 +456,13 @@ public class OrderBookImpl implements OrderBook {
 
         private int get(long key) {
             int mask = values.length - 1;
-            int hash = mix(key);
-            int index = hash & mask;
+            int index = mix(key) & mask;
             while (true) {
                 int value = values[index];
                 if (value == missingValue) {
                     return missingValue;
                 }
-                if (hashes[index] == hash && keys[index] == key) {
+                if (keys[index] == key) {
                     return value;
                 }
                 index = (index + 1) & mask;
@@ -478,19 +475,17 @@ public class OrderBookImpl implements OrderBook {
             }
 
             int mask = values.length - 1;
-            int hash = mix(key);
-            int index = hash & mask;
+            int index = mix(key) & mask;
             while (true) {
                 int current = values[index];
                 if (current == missingValue) {
-                    hashes[index] = hash;
                     keys[index] = key;
                     values[index] = value;
                     slotIndexes[value] = index;
                     size++;
                     return;
                 }
-                if (hashes[index] == hash && keys[index] == key) {
+                if (keys[index] == key) {
                     if (current != missingValue) {
                         slotIndexes[current] = missingValue;
                     }
@@ -504,14 +499,13 @@ public class OrderBookImpl implements OrderBook {
 
         private int remove(long key, int[] slotIndexes) {
             int mask = values.length - 1;
-            int hash = mix(key);
-            int index = hash & mask;
+            int index = mix(key) & mask;
             while (true) {
                 int current = values[index];
                 if (current == missingValue) {
                     return missingValue;
                 }
-                if (hashes[index] == hash && keys[index] == key) {
+                if (keys[index] == key) {
                     int removed = current;
                     slotIndexes[removed] = missingValue;
                     deleteIndex(index, slotIndexes);
@@ -538,14 +532,12 @@ public class OrderBookImpl implements OrderBook {
             while (true) {
                 int value = values[next];
                 if (value == missingValue) {
-                    hashes[gap] = 0;
                     values[gap] = missingValue;
                     return;
                 }
 
-                int home = hashes[next] & mask;
+                int home = mix(keys[next]) & mask;
                 if (((next - home) & mask) >= ((gap - home) & mask)) {
-                    hashes[gap] = hashes[next];
                     keys[gap] = keys[next];
                     values[gap] = value;
                     slotIndexes[value] = gap;
@@ -557,10 +549,8 @@ public class OrderBookImpl implements OrderBook {
 
         private void resize(int[] slotIndexes) {
             long[] oldKeys = keys;
-            int[] oldHashes = hashes;
             int[] oldValues = values;
             keys = new long[oldKeys.length << 1];
-            hashes = new int[oldHashes.length << 1];
             values = filledIntArray(oldValues.length << 1, missingValue);
             resizeThreshold = (int) (values.length * loadFactor);
 
@@ -569,19 +559,18 @@ public class OrderBookImpl implements OrderBook {
             for (int i = 0; i < oldValues.length; i++) {
                 int value = oldValues[i];
                 if (value != missingValue) {
-                    reinsert(oldKeys[i], oldHashes[i], value, slotIndexes);
+                    reinsert(oldKeys[i], value, slotIndexes);
                 }
             }
             size = oldSize;
         }
 
-        private void reinsert(long key, int hash, int value, int[] slotIndexes) {
+        private void reinsert(long key, int value, int[] slotIndexes) {
             int mask = values.length - 1;
-            int index = hash & mask;
+            int index = mix(key) & mask;
             while (values[index] != missingValue) {
                 index = (index + 1) & mask;
             }
-            hashes[index] = hash;
             keys[index] = key;
             values[index] = value;
             slotIndexes[value] = index;
