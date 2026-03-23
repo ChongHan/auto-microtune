@@ -2,7 +2,6 @@ package com.xiaohanc.orderbook;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
@@ -10,7 +9,7 @@ import java.util.Objects;
 public class OrderBookImpl implements OrderBook {
     private final SideBook bids = new SideBook(true);
     private final SideBook asks = new SideBook(false);
-    private final HashMap<Long, RestingOrder> orderById = new HashMap<>(16384);
+    private final LongOrderMap orderById = new LongOrderMap(16384);
     private final OrderMatchListener listener;
 
     public OrderBookImpl(OrderMatchListener listener) {
