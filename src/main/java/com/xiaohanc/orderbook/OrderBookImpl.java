@@ -5,6 +5,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.TreeSet;
 
 public class OrderBookImpl implements OrderBook {
     private final SideBook bids = new SideBook(true);
@@ -121,13 +122,9 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private static final class SideBook {
-        private static final int INITIAL_HEAP_CAPACITY = 256;
-        private static final int HEAP_ARITY = 5;
-
         private final boolean buySide;
         private final LongObjectMap<PriceLevel> levels = new LongObjectMap<>(256, 0.5f);
-        private PriceLevel[] heap = new PriceLevel[INITIAL_HEAP_CAPACITY];
-        private int heapSize;
+        private final TreeSet<Long> activePrices = new TreeSet<>();
 
         private SideBook(boolean buySide) {
             this.buySide = buySide;
@@ -140,106 +137,30 @@ public class OrderBookImpl implements OrderBook {
         private PriceLevel addLevel(long price) {
             PriceLevel level = new PriceLevel(this, price);
             levels.put(price, level);
-            push(level);
+            activePrices.add(price);
             return level;
         }
 
         private PriceLevel best() {
-            return heapSize == 0 ? null : heap[0];
+            if (activePrices.isEmpty()) {
+                return null;
+            }
+            long bestPrice = buySide ? activePrices.last() : activePrices.first();
+            return levels.get(bestPrice);
         }
 
         private void removeLevel(PriceLevel level) {
             levels.remove(level.price);
-            removeAt(level.heapIndex);
+            activePrices.remove(level.price);
         }
 
         private List<PriceLevel> snapshotLevels() {
-            List<PriceLevel> orderedLevels = new ArrayList<>(levels.size());
-            levels.addValuesTo(orderedLevels);
-            orderedLevels.sort((left, right) -> buySide
-                    ? Long.compare(right.price, left.price)
-                    : Long.compare(left.price, right.price));
+            List<PriceLevel> orderedLevels = new ArrayList<>(activePrices.size());
+            Iterable<Long> prices = buySide ? activePrices.descendingSet() : activePrices;
+            for (long price : prices) {
+                orderedLevels.add(levels.get(price));
+            }
             return orderedLevels;
-        }
-
-        private void push(PriceLevel level) {
-            if (heapSize == heap.length) {
-                PriceLevel[] expanded = new PriceLevel[heap.length << 1];
-                System.arraycopy(heap, 0, expanded, 0, heap.length);
-                heap = expanded;
-            }
-
-            heap[heapSize] = level;
-            level.heapIndex = heapSize;
-            siftUp(heapSize++);
-        }
-
-        private void removeAt(int index) {
-            int lastIndex = --heapSize;
-            PriceLevel removed = heap[index];
-            PriceLevel replacement = heap[lastIndex];
-            heap[lastIndex] = null;
-            removed.heapIndex = -1;
-
-            if (index == lastIndex) {
-                return;
-            }
-
-            heap[index] = replacement;
-            replacement.heapIndex = index;
-            if (index > 0 && better(heap[index], heap[(index - 1) / HEAP_ARITY])) {
-                siftUp(index);
-            } else {
-                siftDown(index);
-            }
-        }
-
-        private void siftUp(int index) {
-            while (index > 0) {
-                int parent = (index - 1) / HEAP_ARITY;
-                if (!better(heap[index], heap[parent])) {
-                    return;
-                }
-                swap(index, parent);
-                index = parent;
-            }
-        }
-
-        private void siftDown(int index) {
-            while (true) {
-                int firstChild = index * HEAP_ARITY + 1;
-                if (firstChild >= heapSize) {
-                    return;
-                }
-
-                int bestChild = firstChild;
-                int childLimit = Math.min(firstChild + HEAP_ARITY, heapSize);
-                for (int child = firstChild + 1; child < childLimit; child++) {
-                    if (better(heap[child], heap[bestChild])) {
-                        bestChild = child;
-                    }
-                }
-
-                if (!better(heap[bestChild], heap[index])) {
-                    return;
-                }
-
-                swap(index, bestChild);
-                index = bestChild;
-            }
-        }
-
-        private boolean better(PriceLevel left, PriceLevel right) {
-            return buySide ? left.price > right.price : left.price < right.price;
-        }
-
-        private void swap(int left, int right) {
-            PriceLevel leftLevel = heap[left];
-            PriceLevel rightLevel = heap[right];
-            heap[left] = rightLevel;
-            heap[right] = leftLevel;
-            leftLevel.heapIndex = right;
-            rightLevel.heapIndex = left;
         }
 
         private Order.Side side() {
