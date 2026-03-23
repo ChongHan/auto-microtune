@@ -572,12 +572,16 @@ public class OrderBookImpl implements OrderBook {
             }
 
             tail.next = order;
-            order.prev = tail;
             tail = order;
         }
 
         private void unlink(RestingOrder order) {
-            RestingOrder prev = order.prev;
+            RestingOrder prev = null;
+            RestingOrder current = head;
+            while (current != order) {
+                prev = current;
+                current = current.next;
+            }
             RestingOrder next = order.next;
             if (prev == null) {
                 head = next;
@@ -586,10 +590,7 @@ public class OrderBookImpl implements OrderBook {
             }
             if (next == null) {
                 tail = prev;
-            } else {
-                next.prev = prev;
             }
-            order.prev = null;
             order.next = null;
         }
 
@@ -602,7 +603,6 @@ public class OrderBookImpl implements OrderBook {
         private final long id;
         private long quantity;
         private final PriceLevel level;
-        private RestingOrder prev;
         private RestingOrder next;
 
         private RestingOrder(long id, long quantity, PriceLevel level) {
