@@ -7,25 +7,10 @@ import java.util.NoSuchElementException;
 import java.util.Objects;
 
 public class OrderBookImpl implements OrderBook {
-    private static final int NO_ORDER = -1;
-    private static final byte BUY = 1;
-    private static final byte SELL = 2;
-
     private final SideBook bids = new SideBook(true);
     private final SideBook asks = new SideBook(false);
-    private final LongIntMap orderSlotById = new LongIntMap(4096);
+    private final LongObjectMap<RestingOrder> orderById = new LongObjectMap<>(4096);
     private final OrderMatchListener listener;
-
-    private long[] orderIds = new long[1024];
-    private long[] orderPrices = new long[1024];
-    private long[] orderQuantities = new long[1024];
-    private byte[] orderSides = new byte[1024];
-    private PriceLevel[] orderLevels = new PriceLevel[1024];
-    private int[] prevOrders = new int[1024];
-    private int[] nextOrders = new int[1024];
-    private int orderCapacity = 1024;
-    private int nextOrderSlot;
-    private int freeOrderSlot = NO_ORDER;
 
     public OrderBookImpl(OrderMatchListener listener) {
         this.listener = Objects.requireNonNull(listener);
@@ -44,29 +29,30 @@ public class OrderBookImpl implements OrderBook {
             level = book.addLevel(price);
         }
 
-        int orderSlot = allocateOrderSlot();
-        orderIds[orderSlot] = id;
-        orderPrices[orderSlot] = price;
-        orderQuantities[orderSlot] = remainingQuantity;
-        orderSides[orderSlot] = side == Order.Side.BUY ? BUY : SELL;
-        orderLevels[orderSlot] = level;
-        appendOrder(level, orderSlot);
-        orderSlotById.put(id, orderSlot);
+        RestingOrder order = new RestingOrder(id, side, price, remainingQuantity, level);
+        level.append(order);
+        orderById.put(id, order);
     }
 
     @Override
     public void cancelOrder(long id) {
-        int orderSlot = removeTrackedOrder(id);
-        removeOrder(orderSlot);
-        releaseOrderSlot(orderSlot);
+        RestingOrder order = orderById.remove(id);
+        if (order == null) {
+            throw new NoSuchElementException("Order ID not found: " + id);
+        }
+
+        removeOrder(order);
     }
 
     @Override
     public void modifyOrder(long id, long newPrice, long newQuantity) {
-        int orderSlot = removeTrackedOrder(id);
-        Order.Side side = toSide(orderSides[orderSlot]);
-        removeOrder(orderSlot);
-        releaseOrderSlot(orderSlot);
+        RestingOrder order = orderById.get(id);
+        if (order == null) {
+            throw new NoSuchElementException("Order ID not found: " + id);
+        }
+
+        Order.Side side = order.side;
+        cancelOrder(id);
         addOrder(id, side, newPrice, newQuantity);
     }
 
@@ -90,22 +76,19 @@ public class OrderBookImpl implements OrderBook {
                 break;
             }
 
-            int makerSlot = level.head;
-            while (makerSlot != NO_ORDER && remainingQuantity > 0) {
-                int nextMakerSlot = nextOrders[makerSlot];
-                long matchedQuantity = Math.min(remainingQuantity, orderQuantities[makerSlot]);
-                listener.onMatch(orderIds[makerSlot], incomingId, orderPrices[makerSlot], matchedQuantity);
+            RestingOrder maker = level.head;
+            while (maker != null && remainingQuantity > 0) {
+                RestingOrder nextMaker = maker.next;
+                long matchedQuantity = Math.min(remainingQuantity, maker.quantity);
+                listener.onMatch(maker.id, incomingId, maker.price, matchedQuantity);
 
                 remainingQuantity -= matchedQuantity;
-                long remainingMakerQuantity = orderQuantities[makerSlot] - matchedQuantity;
-                if (remainingMakerQuantity == 0) {
-                    orderSlotById.remove(orderIds[makerSlot]);
-                    removeOrder(makerSlot);
-                    releaseOrderSlot(makerSlot);
-                } else {
-                    orderQuantities[makerSlot] = remainingMakerQuantity;
+                maker.quantity -= matchedQuantity;
+                if (maker.quantity == 0) {
+                    orderById.remove(maker.id);
+                    removeOrder(maker);
                 }
-                makerSlot = nextMakerSlot;
+                maker = nextMaker;
             }
         }
 
@@ -118,131 +101,23 @@ public class OrderBookImpl implements OrderBook {
                 : incomingPrice <= restingPrice;
     }
 
-    private int removeTrackedOrder(long id) {
-        int orderSlot = orderSlotById.remove(id);
-        if (orderSlot == NO_ORDER) {
-            throw new NoSuchElementException("Order ID not found: " + id);
-        }
-        return orderSlot;
-    }
-
-    private void appendOrder(PriceLevel level, int orderSlot) {
-        int tail = level.tail;
-        prevOrders[orderSlot] = tail;
-        nextOrders[orderSlot] = NO_ORDER;
-        if (tail == NO_ORDER) {
-            level.head = orderSlot;
-            level.tail = orderSlot;
-            return;
-        }
-
-        nextOrders[tail] = orderSlot;
-        level.tail = orderSlot;
-    }
-
-    private void removeOrder(int orderSlot) {
-        PriceLevel level = orderLevels[orderSlot];
-        int prevOrderSlot = prevOrders[orderSlot];
-        int nextOrderSlot = nextOrders[orderSlot];
-
-        if (prevOrderSlot == NO_ORDER) {
-            level.head = nextOrderSlot;
-        } else {
-            nextOrders[prevOrderSlot] = nextOrderSlot;
-        }
-
-        if (nextOrderSlot == NO_ORDER) {
-            level.tail = prevOrderSlot;
-        } else {
-            prevOrders[nextOrderSlot] = prevOrderSlot;
-        }
-
-        orderLevels[orderSlot] = null;
-        prevOrders[orderSlot] = NO_ORDER;
-        nextOrders[orderSlot] = NO_ORDER;
+    private void removeOrder(RestingOrder order) {
+        PriceLevel level = order.level;
+        level.unlink(order);
         if (level.isEmpty()) {
             level.book.removeLevel(level);
         }
     }
 
-    private int allocateOrderSlot() {
-        int orderSlot = freeOrderSlot;
-        if (orderSlot != NO_ORDER) {
-            freeOrderSlot = nextOrders[orderSlot];
-            nextOrders[orderSlot] = NO_ORDER;
-            prevOrders[orderSlot] = NO_ORDER;
-            return orderSlot;
-        }
-
-        orderSlot = nextOrderSlot++;
-        if (orderSlot == orderCapacity) {
-            growOrderStorage();
-        }
-        return orderSlot;
-    }
-
-    private void releaseOrderSlot(int orderSlot) {
-        nextOrders[orderSlot] = freeOrderSlot;
-        prevOrders[orderSlot] = NO_ORDER;
-        orderLevels[orderSlot] = null;
-        orderSides[orderSlot] = 0;
-        freeOrderSlot = orderSlot;
-    }
-
-    private void growOrderStorage() {
-        int newCapacity = orderCapacity << 1;
-        orderIds = copyOf(orderIds, newCapacity);
-        orderPrices = copyOf(orderPrices, newCapacity);
-        orderQuantities = copyOf(orderQuantities, newCapacity);
-        orderSides = copyOf(orderSides, newCapacity);
-        orderLevels = copyOf(orderLevels, newCapacity);
-        prevOrders = copyOf(prevOrders, newCapacity);
-        nextOrders = copyOf(nextOrders, newCapacity);
-        orderCapacity = newCapacity;
-    }
-
     private List<Order> snapshot(SideBook book) {
         List<PriceLevel> levels = book.snapshotLevels();
-        List<Order> orders = new ArrayList<>(orderSlotById.size());
+        List<Order> orders = new ArrayList<>(orderById.size());
         for (PriceLevel level : levels) {
-            for (int orderSlot = level.head; orderSlot != NO_ORDER; orderSlot = nextOrders[orderSlot]) {
-                orders.add(new Order(
-                        orderIds[orderSlot],
-                        toSide(orderSides[orderSlot]),
-                        orderPrices[orderSlot],
-                        orderQuantities[orderSlot]
-                ));
+            for (RestingOrder order = level.head; order != null; order = order.next) {
+                orders.add(new Order(order.id, order.side, order.price, order.quantity));
             }
         }
         return Collections.unmodifiableList(orders);
-    }
-
-    private Order.Side toSide(byte side) {
-        return side == BUY ? Order.Side.BUY : Order.Side.SELL;
-    }
-
-    private long[] copyOf(long[] source, int newLength) {
-        long[] copy = new long[newLength];
-        System.arraycopy(source, 0, copy, 0, source.length);
-        return copy;
-    }
-
-    private byte[] copyOf(byte[] source, int newLength) {
-        byte[] copy = new byte[newLength];
-        System.arraycopy(source, 0, copy, 0, source.length);
-        return copy;
-    }
-
-    private int[] copyOf(int[] source, int newLength) {
-        int[] copy = new int[newLength];
-        System.arraycopy(source, 0, copy, 0, source.length);
-        return copy;
-    }
-
-    private PriceLevel[] copyOf(PriceLevel[] source, int newLength) {
-        PriceLevel[] copy = new PriceLevel[newLength];
-        System.arraycopy(source, 0, copy, 0, source.length);
-        return copy;
     }
 
     private static final class SideBook {
@@ -304,7 +179,7 @@ public class OrderBookImpl implements OrderBook {
             PriceLevel removed = heap[index];
             PriceLevel replacement = heap[lastIndex];
             heap[lastIndex] = null;
-            removed.heapIndex = NO_ORDER;
+            removed.heapIndex = -1;
 
             if (index == lastIndex) {
                 return;
@@ -369,11 +244,21 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private static final class LongObjectMap<V> {
+        private static final int DEFAULT_CAPACITY = 16;
+
         private long[] keys;
         private Object[] values;
         private int size;
         private final float loadFactor;
         private int resizeThreshold;
+
+        private LongObjectMap() {
+            this(DEFAULT_CAPACITY, 0.6f);
+        }
+
+        private LongObjectMap(int capacity) {
+            this(capacity, 0.6f);
+        }
 
         private LongObjectMap(int capacity, float loadFactor) {
             int actualCapacity = 1;
@@ -522,160 +407,67 @@ public class OrderBookImpl implements OrderBook {
         }
     }
 
-    private static final class LongIntMap {
-        private long[] keys;
-        private int[] values;
-        private int size;
-        private final float loadFactor;
-        private int resizeThreshold;
-
-        private LongIntMap(int capacity) {
-            this(capacity, 0.6f);
-        }
-
-        private LongIntMap(int capacity, float loadFactor) {
-            int actualCapacity = 1;
-            while (actualCapacity < capacity) {
-                actualCapacity <<= 1;
-            }
-            this.loadFactor = loadFactor;
-            keys = new long[actualCapacity];
-            values = new int[actualCapacity];
-            resizeThreshold = (int) (actualCapacity * loadFactor);
-        }
-
-        private int size() {
-            return size;
-        }
-
-        private int get(long key) {
-            int mask = values.length - 1;
-            int index = mix(key) & mask;
-            while (true) {
-                int value = values[index];
-                if (value == 0) {
-                    return NO_ORDER;
-                }
-                if (keys[index] == key) {
-                    return value - 1;
-                }
-                index = (index + 1) & mask;
-            }
-        }
-
-        private int put(long key, int value) {
-            if (size >= resizeThreshold) {
-                resize();
-            }
-
-            int storedValue = value + 1;
-            int mask = values.length - 1;
-            int index = mix(key) & mask;
-            while (true) {
-                int current = values[index];
-                if (current == 0) {
-                    keys[index] = key;
-                    values[index] = storedValue;
-                    size++;
-                    return NO_ORDER;
-                }
-                if (keys[index] == key) {
-                    values[index] = storedValue;
-                    return current - 1;
-                }
-                index = (index + 1) & mask;
-            }
-        }
-
-        private int remove(long key) {
-            int mask = values.length - 1;
-            int index = mix(key) & mask;
-            while (true) {
-                int current = values[index];
-                if (current == 0) {
-                    return NO_ORDER;
-                }
-                if (keys[index] == key) {
-                    int removed = current - 1;
-                    deleteIndex(index);
-                    return removed;
-                }
-                index = (index + 1) & mask;
-            }
-        }
-
-        private void deleteIndex(int index) {
-            int mask = values.length - 1;
-            size--;
-            int gap = index;
-            int next = (index + 1) & mask;
-            while (true) {
-                int value = values[next];
-                if (value == 0) {
-                    values[gap] = 0;
-                    return;
-                }
-
-                int home = mix(keys[next]) & mask;
-                if (((next - home) & mask) >= ((gap - home) & mask)) {
-                    keys[gap] = keys[next];
-                    values[gap] = value;
-                    gap = next;
-                }
-                next = (next + 1) & mask;
-            }
-        }
-
-        private void resize() {
-            long[] oldKeys = keys;
-            int[] oldValues = values;
-            keys = new long[oldKeys.length << 1];
-            values = new int[oldValues.length << 1];
-            resizeThreshold = (int) (values.length * loadFactor);
-
-            int oldSize = size;
-            size = 0;
-            for (int i = 0; i < oldValues.length; i++) {
-                int value = oldValues[i];
-                if (value != 0) {
-                    reinsert(oldKeys[i], value);
-                }
-            }
-            size = oldSize;
-        }
-
-        private void reinsert(long key, int value) {
-            int mask = values.length - 1;
-            int index = mix(key) & mask;
-            while (values[index] != 0) {
-                index = (index + 1) & mask;
-            }
-            keys[index] = key;
-            values[index] = value;
-            size++;
-        }
-
-        private int mix(long key) {
-            long mixed = key ^ (key >>> 33);
-            mixed ^= mixed >>> 17;
-            return (int) mixed;
-        }
-    }
-
     private static final class PriceLevel {
         private final SideBook book;
         private final long price;
-        private int heapIndex = NO_ORDER;
-        private int head = NO_ORDER;
-        private int tail = NO_ORDER;
+        private int heapIndex = -1;
+        private RestingOrder head;
+        private RestingOrder tail;
 
         private PriceLevel(SideBook book, long price) {
             this.book = book;
             this.price = price;
         }
 
+        private void append(RestingOrder order) {
+            if (tail == null) {
+                head = order;
+                tail = order;
+                return;
+            }
+
+            tail.next = order;
+            order.prev = tail;
+            tail = order;
+        }
+
+        private void unlink(RestingOrder order) {
+            RestingOrder prev = order.prev;
+            RestingOrder next = order.next;
+            if (prev == null) {
+                head = next;
+            } else {
+                prev.next = next;
+            }
+            if (next == null) {
+                tail = prev;
+            } else {
+                next.prev = prev;
+            }
+            order.prev = null;
+            order.next = null;
+        }
+
         private boolean isEmpty() {
-            return head == NO_ORDER;
+            return head == null;
+        }
+    }
+
+    private static final class RestingOrder {
+        private final long id;
+        private final Order.Side side;
+        private final long price;
+        private long quantity;
+        private final PriceLevel level;
+        private RestingOrder prev;
+        private RestingOrder next;
+
+        private RestingOrder(long id, Order.Side side, long price, long quantity, PriceLevel level) {
+            this.id = id;
+            this.side = side;
+            this.price = price;
+            this.quantity = quantity;
+            this.level = level;
         }
     }
 }
