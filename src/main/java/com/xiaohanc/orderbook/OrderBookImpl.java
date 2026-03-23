@@ -9,7 +9,7 @@ import java.util.Objects;
 
 public class OrderBookImpl implements OrderBook {
     private static final int NO_INDEX = -1;
-    private static final byte BUY_SIDE = 1;
+    private static final int SELL_LEVEL_FLAG = Integer.MIN_VALUE;
 
     private final SideBook bids = new SideBook(true);
     private final SideBook asks = new SideBook(false);
@@ -22,7 +22,6 @@ public class OrderBookImpl implements OrderBook {
     private int[] orderPrev = filledIntArray(1024, NO_INDEX);
     private int[] orderNext = filledIntArray(1024, NO_INDEX);
     private int[] orderMapSlots = filledIntArray(1024, NO_INDEX);
-    private byte[] orderSides = new byte[1024];
     private int orderCapacity = 1024;
     private int nextOrderSlot;
     private int freeOrderSlot = NO_INDEX;
@@ -47,8 +46,7 @@ public class OrderBookImpl implements OrderBook {
         int orderSlot = allocateOrderSlot();
         orderIds[orderSlot] = id;
         orderQuantities[orderSlot] = remainingQuantity;
-        orderLevels[orderSlot] = levelSlot;
-        orderSides[orderSlot] = book.sideFlag;
+        orderLevels[orderSlot] = book.buySide ? levelSlot : levelSlot | SELL_LEVEL_FLAG;
         appendOrder(book, levelSlot, orderSlot);
         orderById.put(id, orderSlot, orderMapSlots);
     }
@@ -71,7 +69,8 @@ public class OrderBookImpl implements OrderBook {
             throw new NoSuchElementException("Order ID not found: " + id);
         }
 
-        Order.Side side = orderSides[orderSlot] == BUY_SIDE ? Order.Side.BUY : Order.Side.SELL;
+        int levelRef = orderLevels[orderSlot];
+        Order.Side side = levelRef >= 0 ? Order.Side.BUY : Order.Side.SELL;
         removeOrder(orderSlot);
         releaseOrderSlot(orderSlot);
         addOrder(id, side, newPrice, newQuantity);
@@ -131,8 +130,9 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private void removeOrder(int orderSlot) {
-        SideBook book = orderSides[orderSlot] == BUY_SIDE ? bids : asks;
-        int levelSlot = orderLevels[orderSlot];
+        int levelRef = orderLevels[orderSlot];
+        SideBook book = levelRef >= 0 ? bids : asks;
+        int levelSlot = levelRef & Integer.MAX_VALUE;
         int prevOrderSlot = orderPrev[orderSlot];
         int nextOrderSlot = orderNext[orderSlot];
 
@@ -211,7 +211,6 @@ public class OrderBookImpl implements OrderBook {
         orderPrev = growIntArray(orderPrev, newCapacity);
         orderNext = growIntArray(orderNext, newCapacity);
         orderMapSlots = growIntArray(orderMapSlots, newCapacity);
-        orderSides = Arrays.copyOf(orderSides, newCapacity);
         orderCapacity = newCapacity;
     }
 
@@ -247,7 +246,6 @@ public class OrderBookImpl implements OrderBook {
         private static final int HEAP_ARITY = 5;
 
         private final boolean buySide;
-        private final byte sideFlag;
         private final LongIntMap levels = new LongIntMap(256, 0.5f, NO_INDEX);
 
         private long[] levelPrices = new long[INITIAL_LEVEL_CAPACITY];
@@ -265,7 +263,6 @@ public class OrderBookImpl implements OrderBook {
 
         private SideBook(boolean buySide) {
             this.buySide = buySide;
-            this.sideFlag = buySide ? BUY_SIDE : 0;
         }
 
         private int level(long price) {
