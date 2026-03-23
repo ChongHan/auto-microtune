@@ -248,7 +248,7 @@ public class OrderBookImpl implements OrderBook {
 
         private final boolean buySide;
         private final byte sideFlag;
-        private final LongIntMap levels = new LongIntMap(256, 0.35f, NO_INDEX);
+        private final LevelMap levels = new LevelMap(256, 0.35f);
 
         private long[] levelPrices = new long[INITIAL_LEVEL_CAPACITY];
         private long[] levelKeys = new long[INITIAL_LEVEL_CAPACITY];
@@ -278,7 +278,7 @@ public class OrderBookImpl implements OrderBook {
             levelKeys[levelSlot] = buySide ? -price : price;
             levelHeads[levelSlot] = NO_INDEX;
             levelTails[levelSlot] = NO_INDEX;
-            levels.put(price, levelSlot, levelMapSlots);
+            levels.put(price, levelSlot);
             push(levelSlot);
             return levelSlot;
         }
@@ -288,7 +288,7 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private void removeLevel(int levelSlot) {
-            levels.removeValue(levelSlot, levelMapSlots);
+            levels.removeValue(levelSlot);
             removeAt(levelHeapIndex[levelSlot]);
             releaseLevelSlot(levelSlot);
         }
@@ -427,6 +427,136 @@ public class OrderBookImpl implements OrderBook {
 
         private Order.Side side() {
             return buySide ? Order.Side.BUY : Order.Side.SELL;
+        }
+
+        private final class LevelMap {
+            private long[] keys;
+            private int[] values;
+            private int size;
+            private final float loadFactor;
+            private int resizeThreshold;
+
+            private LevelMap(int capacity, float loadFactor) {
+                int actualCapacity = 1;
+                while (actualCapacity < capacity) {
+                    actualCapacity <<= 1;
+                }
+                this.loadFactor = loadFactor;
+                keys = new long[actualCapacity];
+                values = filledIntArray(actualCapacity, NO_INDEX);
+                resizeThreshold = (int) (actualCapacity * loadFactor);
+            }
+
+            private int get(long key) {
+                int mask = values.length - 1;
+                int index = mix(key) & mask;
+                while (true) {
+                    int value = values[index];
+                    if (value == NO_INDEX) {
+                        return NO_INDEX;
+                    }
+                    if (keys[index] == key) {
+                        return value;
+                    }
+                    index = (index + 1) & mask;
+                }
+            }
+
+            private void put(long key, int value) {
+                if (size >= resizeThreshold) {
+                    resize();
+                }
+
+                int mask = values.length - 1;
+                int index = mix(key) & mask;
+                while (true) {
+                    int current = values[index];
+                    if (current == NO_INDEX) {
+                        keys[index] = key;
+                        values[index] = value;
+                        levelMapSlots[value] = index;
+                        size++;
+                        return;
+                    }
+                    if (keys[index] == key) {
+                        if (current != NO_INDEX) {
+                            levelMapSlots[current] = NO_INDEX;
+                        }
+                        values[index] = value;
+                        levelMapSlots[value] = index;
+                        return;
+                    }
+                    index = (index + 1) & mask;
+                }
+            }
+
+            private void removeValue(int value) {
+                int index = levelMapSlots[value];
+                if (index == NO_INDEX) {
+                    return;
+                }
+                levelMapSlots[value] = NO_INDEX;
+                deleteIndex(index);
+            }
+
+            private void deleteIndex(int index) {
+                int mask = values.length - 1;
+                size--;
+                int gap = index;
+                int next = (index + 1) & mask;
+                while (true) {
+                    int value = values[next];
+                    if (value == NO_INDEX) {
+                        values[gap] = NO_INDEX;
+                        return;
+                    }
+
+                    int home = mix(keys[next]) & mask;
+                    if (((next - home) & mask) >= ((gap - home) & mask)) {
+                        keys[gap] = keys[next];
+                        values[gap] = value;
+                        levelMapSlots[value] = gap;
+                        gap = next;
+                    }
+                    next = (next + 1) & mask;
+                }
+            }
+
+            private void resize() {
+                long[] oldKeys = keys;
+                int[] oldValues = values;
+                keys = new long[oldKeys.length << 1];
+                values = filledIntArray(oldValues.length << 1, NO_INDEX);
+                resizeThreshold = (int) (values.length * loadFactor);
+
+                int oldSize = size;
+                size = 0;
+                for (int i = 0; i < oldValues.length; i++) {
+                    int value = oldValues[i];
+                    if (value != NO_INDEX) {
+                        reinsert(oldKeys[i], value);
+                    }
+                }
+                size = oldSize;
+            }
+
+            private void reinsert(long key, int value) {
+                int mask = values.length - 1;
+                int index = mix(key) & mask;
+                while (values[index] != NO_INDEX) {
+                    index = (index + 1) & mask;
+                }
+                keys[index] = key;
+                values[index] = value;
+                levelMapSlots[value] = index;
+                size++;
+            }
+
+            private int mix(long key) {
+                long mixed = key ^ (key >>> 33);
+                mixed ^= mixed >>> 17;
+                return (int) mixed;
+            }
         }
     }
 
