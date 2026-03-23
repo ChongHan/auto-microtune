@@ -13,7 +13,7 @@ public class OrderBookImpl implements OrderBook {
 
     private final SideBook bids = new SideBook(true);
     private final SideBook asks = new SideBook(false);
-    private final LongIntMap orderById = new LongIntMap(16384, 0.6f, NO_INDEX);
+    private final OrderMap orderById = new OrderMap(16384, 0.6f);
     private final OrderMatchListener listener;
 
     private long[] orderIds = new long[1024];
@@ -239,6 +239,140 @@ public class OrderBookImpl implements OrderBook {
         int[] array = new int[length];
         Arrays.fill(array, value);
         return array;
+    }
+
+    private static final class OrderMap {
+        private long[] keys;
+        private int[] values;
+        private int size;
+        private final float loadFactor;
+        private int resizeThreshold;
+
+        private OrderMap(int capacity, float loadFactor) {
+            int actualCapacity = 1;
+            while (actualCapacity < capacity) {
+                actualCapacity <<= 1;
+            }
+            this.loadFactor = loadFactor;
+            keys = new long[actualCapacity];
+            values = filledIntArray(actualCapacity, NO_INDEX);
+            resizeThreshold = (int) (actualCapacity * loadFactor);
+        }
+
+        private int size() {
+            return size;
+        }
+
+        private void put(long key, int value, int[] slotIndexes) {
+            if (size >= resizeThreshold) {
+                resize(slotIndexes);
+            }
+
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
+            while (true) {
+                int current = values[index];
+                if (current == NO_INDEX) {
+                    keys[index] = key;
+                    values[index] = value;
+                    slotIndexes[value] = index;
+                    size++;
+                    return;
+                }
+                if (keys[index] == key) {
+                    slotIndexes[current] = NO_INDEX;
+                    values[index] = value;
+                    slotIndexes[value] = index;
+                    return;
+                }
+                index = (index + 1) & mask;
+            }
+        }
+
+        private int remove(long key, int[] slotIndexes) {
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
+            while (true) {
+                int current = values[index];
+                if (current == NO_INDEX) {
+                    return NO_INDEX;
+                }
+                if (keys[index] == key) {
+                    slotIndexes[current] = NO_INDEX;
+                    deleteIndex(index, slotIndexes);
+                    return current;
+                }
+                index = (index + 1) & mask;
+            }
+        }
+
+        private void removeValue(int value, int[] slotIndexes) {
+            int index = slotIndexes[value];
+            if (index == NO_INDEX) {
+                return;
+            }
+            slotIndexes[value] = NO_INDEX;
+            deleteIndex(index, slotIndexes);
+        }
+
+        private void deleteIndex(int index, int[] slotIndexes) {
+            int mask = values.length - 1;
+            size--;
+            int gap = index;
+            int next = (index + 1) & mask;
+            while (true) {
+                int value = values[next];
+                if (value == NO_INDEX) {
+                    values[gap] = NO_INDEX;
+                    return;
+                }
+
+                int home = mix(keys[next]) & mask;
+                if (((next - home) & mask) >= ((gap - home) & mask)) {
+                    keys[gap] = keys[next];
+                    values[gap] = value;
+                    slotIndexes[value] = gap;
+                    gap = next;
+                }
+                next = (next + 1) & mask;
+            }
+        }
+
+        private void resize(int[] slotIndexes) {
+            long[] oldKeys = keys;
+            int[] oldValues = values;
+            keys = new long[oldKeys.length << 1];
+            values = filledIntArray(oldValues.length << 1, NO_INDEX);
+            resizeThreshold = (int) (values.length * loadFactor);
+
+            int oldSize = size;
+            size = 0;
+            for (int i = 0; i < oldValues.length; i++) {
+                int value = oldValues[i];
+                if (value != NO_INDEX) {
+                    reinsert(oldKeys[i], value, slotIndexes);
+                }
+            }
+            size = oldSize;
+        }
+
+        private void reinsert(long key, int value, int[] slotIndexes) {
+            int mask = values.length - 1;
+            int index = mix(key) & mask;
+            while (values[index] != NO_INDEX) {
+                index = (index + 1) & mask;
+            }
+            keys[index] = key;
+            values[index] = value;
+            slotIndexes[value] = index;
+            size++;
+        }
+
+        private int mix(long key) {
+            long mixed = key ^ (key >>> 33);
+            mixed ^= mixed >>> 17;
+            return (int) mixed;
+        }
     }
 
     private static final class SideBook {
