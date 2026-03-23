@@ -169,19 +169,9 @@ public class OrderBookImpl implements OrderBook {
                 heap = expanded;
             }
 
-            int index = heapSize++;
-            while (index > 0) {
-                int parent = (index - 1) / HEAP_ARITY;
-                PriceLevel parentLevel = heap[parent];
-                if (!better(level, parentLevel)) {
-                    break;
-                }
-                heap[index] = parentLevel;
-                parentLevel.heapIndex = index;
-                index = parent;
-            }
-            heap[index] = level;
-            level.heapIndex = index;
+            heap[heapSize] = level;
+            level.heapIndex = heapSize;
+            siftUp(heapSize++);
         }
 
         private void removeAt(int index) {
@@ -195,50 +185,63 @@ public class OrderBookImpl implements OrderBook {
                 return;
             }
 
-            int parent = (index - 1) / HEAP_ARITY;
-            if (index > 0 && better(replacement, heap[parent])) {
-                while (index > 0) {
-                    parent = (index - 1) / HEAP_ARITY;
-                    PriceLevel parentLevel = heap[parent];
-                    if (!better(replacement, parentLevel)) {
-                        break;
-                    }
-                    heap[index] = parentLevel;
-                    parentLevel.heapIndex = index;
-                    index = parent;
-                }
-            } else {
-                while (true) {
-                    int firstChild = index * HEAP_ARITY + 1;
-                    if (firstChild >= heapSize) {
-                        break;
-                    }
-
-                    int bestChild = firstChild;
-                    int childLimit = Math.min(firstChild + HEAP_ARITY, heapSize);
-                    for (int child = firstChild + 1; child < childLimit; child++) {
-                        if (better(heap[child], heap[bestChild])) {
-                            bestChild = child;
-                        }
-                    }
-
-                    if (!better(heap[bestChild], replacement)) {
-                        break;
-                    }
-
-                    heap[index] = heap[bestChild];
-                    heap[index].heapIndex = index;
-                    index = bestChild;
-                }
-            }
-
             heap[index] = replacement;
             replacement.heapIndex = index;
+            if (index > 0 && better(heap[index], heap[(index - 1) / HEAP_ARITY])) {
+                siftUp(index);
+            } else {
+                siftDown(index);
+            }
+        }
+
+        private void siftUp(int index) {
+            while (index > 0) {
+                int parent = (index - 1) / HEAP_ARITY;
+                if (!better(heap[index], heap[parent])) {
+                    return;
+                }
+                swap(index, parent);
+                index = parent;
+            }
+        }
+
+        private void siftDown(int index) {
+            while (true) {
+                int firstChild = index * HEAP_ARITY + 1;
+                if (firstChild >= heapSize) {
+                    return;
+                }
+
+                int bestChild = firstChild;
+                int childLimit = Math.min(firstChild + HEAP_ARITY, heapSize);
+                for (int child = firstChild + 1; child < childLimit; child++) {
+                    if (better(heap[child], heap[bestChild])) {
+                        bestChild = child;
+                    }
+                }
+
+                if (!better(heap[bestChild], heap[index])) {
+                    return;
+                }
+
+                swap(index, bestChild);
+                index = bestChild;
+            }
         }
 
         private boolean better(PriceLevel left, PriceLevel right) {
             return buySide ? left.price > right.price : left.price < right.price;
         }
+
+        private void swap(int left, int right) {
+            PriceLevel leftLevel = heap[left];
+            PriceLevel rightLevel = heap[right];
+            heap[left] = rightLevel;
+            heap[right] = leftLevel;
+            leftLevel.heapIndex = right;
+            rightLevel.heapIndex = left;
+        }
+
         private Order.Side side() {
             return buySide ? Order.Side.BUY : Order.Side.SELL;
         }
