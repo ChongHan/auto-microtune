@@ -268,14 +268,23 @@ public class OrderBookImpl implements OrderBook {
 
             int mask = values.length - 1;
             int index = mix(key) & mask;
-            while (values[index] != NO_INDEX) {
+            while (true) {
+                int current = values[index];
+                if (current == NO_INDEX) {
+                    keys[index] = key;
+                    values[index] = value;
+                    slotIndexes[value] = index;
+                    size++;
+                    return;
+                }
+                if (keys[index] == key) {
+                    slotIndexes[current] = NO_INDEX;
+                    values[index] = value;
+                    slotIndexes[value] = index;
+                    return;
+                }
                 index = (index + 1) & mask;
             }
-
-            keys[index] = key;
-            values[index] = value;
-            slotIndexes[value] = index;
-            size++;
         }
 
         private int remove(long key, int[] slotIndexes) {
@@ -334,6 +343,7 @@ public class OrderBookImpl implements OrderBook {
             values = filledIntArray(oldValues.length << 1, NO_INDEX);
             resizeThreshold = (int) (values.length * loadFactor);
 
+            int oldSize = size;
             size = 0;
             for (int i = 0; i < oldValues.length; i++) {
                 int value = oldValues[i];
@@ -341,6 +351,7 @@ public class OrderBookImpl implements OrderBook {
                     reinsert(oldKeys[i], value, slotIndexes);
                 }
             }
+            size = oldSize;
         }
 
         private void reinsert(long key, int value, int[] slotIndexes) {
@@ -588,14 +599,25 @@ public class OrderBookImpl implements OrderBook {
 
                 int mask = values.length - 1;
                 int index = mix(key) & mask;
-                while (values[index] != NO_INDEX) {
+                while (true) {
+                    int current = values[index];
+                    if (current == NO_INDEX) {
+                        keys[index] = key;
+                        values[index] = value;
+                        levelMapSlots[value] = index;
+                        size++;
+                        return;
+                    }
+                    if (keys[index] == key) {
+                        if (current != NO_INDEX) {
+                            levelMapSlots[current] = NO_INDEX;
+                        }
+                        values[index] = value;
+                        levelMapSlots[value] = index;
+                        return;
+                    }
                     index = (index + 1) & mask;
                 }
-
-                keys[index] = key;
-                values[index] = value;
-                levelMapSlots[value] = index;
-                size++;
             }
 
             private void removeValue(int value) {
@@ -637,6 +659,7 @@ public class OrderBookImpl implements OrderBook {
                 values = filledIntArray(oldValues.length << 1, NO_INDEX);
                 resizeThreshold = (int) (values.length * loadFactor);
 
+                int oldSize = size;
                 size = 0;
                 for (int i = 0; i < oldValues.length; i++) {
                     int value = oldValues[i];
@@ -644,6 +667,7 @@ public class OrderBookImpl implements OrderBook {
                         reinsert(oldKeys[i], value);
                     }
                 }
+                size = oldSize;
             }
 
             private void reinsert(long key, int value) {
