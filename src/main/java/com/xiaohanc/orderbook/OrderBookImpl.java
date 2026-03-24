@@ -10,6 +10,9 @@ import java.util.Objects;
 public class OrderBookImpl implements OrderBook {
     private static final int NO_INDEX = -1;
     private static final int ASK_LEVEL_FLAG = Integer.MIN_VALUE;
+    private static final int PAGE_SHIFT = 6;
+    private static final int PAGE_SIZE = 1 << PAGE_SHIFT;
+    private static final int PAGE_MASK = PAGE_SIZE - 1;
 
     private final SideBook bids = new SideBook(true);
     private final SideBook asks = new SideBook(false);
@@ -38,16 +41,16 @@ public class OrderBookImpl implements OrderBook {
         }
 
         SideBook book = side == Order.Side.BUY ? bids : asks;
-        int levelSlot = book.level(price);
-        if (levelSlot == NO_INDEX) {
-            levelSlot = book.addLevel(price);
+        int levelRef = book.levelRef(price);
+        if (levelRef == NO_INDEX) {
+            levelRef = book.createLevel(price);
         }
 
         int orderSlot = allocateOrderSlot();
         orderIds[orderSlot] = id;
         orderQuantities[orderSlot] = remainingQuantity;
-        orderLevels[orderSlot] = side == Order.Side.BUY ? levelSlot : levelSlot | ASK_LEVEL_FLAG;
-        appendOrder(book, levelSlot, orderSlot);
+        orderLevels[orderSlot] = side == Order.Side.BUY ? levelRef : levelRef | ASK_LEVEL_FLAG;
+        book.appendOrder(levelRef, orderSlot, orderPrev, orderNext);
         orderById.put(id, orderSlot, orderMapSlots);
     }
 
@@ -90,17 +93,17 @@ public class OrderBookImpl implements OrderBook {
         long remainingQuantity = incomingQuantity;
 
         while (remainingQuantity > 0) {
-            int levelSlot = oppositeBook.bestLevel();
-            if (levelSlot == NO_INDEX) {
+            int levelRef = oppositeBook.bestLevelRef();
+            if (levelRef == NO_INDEX) {
                 break;
             }
 
-            long matchedPrice = oppositeBook.levelPrices[levelSlot];
+            long matchedPrice = oppositeBook.priceOf(levelRef);
             if (!crosses(incomingSide, incomingPrice, matchedPrice)) {
                 break;
             }
 
-            int makerSlot = oppositeBook.levelHeads[levelSlot];
+            int makerSlot = oppositeBook.levelHead(levelRef);
             while (makerSlot != NO_INDEX && remainingQuantity > 0) {
                 int nextMakerSlot = orderNext[makerSlot];
                 long matchedQuantity = Math.min(remainingQuantity, orderQuantities[makerSlot]);
@@ -110,7 +113,7 @@ public class OrderBookImpl implements OrderBook {
                 long remainingMakerQuantity = orderQuantities[makerSlot] - matchedQuantity;
                 if (remainingMakerQuantity == 0) {
                     orderById.removeValue(makerSlot, orderMapSlots);
-                    removeMatchedHead(oppositeBook, levelSlot, makerSlot, nextMakerSlot);
+                    oppositeBook.removeMatchedHead(levelRef, makerSlot, nextMakerSlot, orderPrev, orderNext);
                     releaseOrderSlot(makerSlot);
                 } else {
                     orderQuantities[makerSlot] = remainingMakerQuantity;
@@ -129,57 +132,15 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private void removeOrder(int orderSlot) {
-        int levelRef = orderLevels[orderSlot];
-        SideBook book = levelRef >= 0 ? bids : asks;
-        int levelSlot = levelRef & Integer.MAX_VALUE;
+        int encodedLevelRef = orderLevels[orderSlot];
+        SideBook book = encodedLevelRef >= 0 ? bids : asks;
+        int levelRef = encodedLevelRef & Integer.MAX_VALUE;
         int prevOrderSlot = orderPrev[orderSlot];
         int nextOrderSlot = orderNext[orderSlot];
 
-        if (prevOrderSlot == NO_INDEX) {
-            book.levelHeads[levelSlot] = nextOrderSlot;
-        } else {
-            orderNext[prevOrderSlot] = nextOrderSlot;
-        }
-
-        if (nextOrderSlot == NO_INDEX) {
-            book.levelTails[levelSlot] = prevOrderSlot;
-        } else {
-            orderPrev[nextOrderSlot] = prevOrderSlot;
-        }
-
+        book.unlinkOrder(levelRef, orderSlot, prevOrderSlot, nextOrderSlot, orderPrev, orderNext);
         orderPrev[orderSlot] = NO_INDEX;
         orderNext[orderSlot] = NO_INDEX;
-        if (book.levelHeads[levelSlot] == NO_INDEX) {
-            book.removeLevel(levelSlot);
-        }
-    }
-
-    private void appendOrder(SideBook book, int levelSlot, int orderSlot) {
-        int tail = book.levelTails[levelSlot];
-        orderPrev[orderSlot] = tail;
-        orderNext[orderSlot] = NO_INDEX;
-        if (tail == NO_INDEX) {
-            book.levelHeads[levelSlot] = orderSlot;
-            book.levelTails[levelSlot] = orderSlot;
-            return;
-        }
-
-        orderNext[tail] = orderSlot;
-        book.levelTails[levelSlot] = orderSlot;
-    }
-
-    private void removeMatchedHead(SideBook book, int levelSlot, int orderSlot, int nextOrderSlot) {
-        orderPrev[orderSlot] = NO_INDEX;
-        orderNext[orderSlot] = NO_INDEX;
-        if (nextOrderSlot == NO_INDEX) {
-            book.levelHeads[levelSlot] = NO_INDEX;
-            book.levelTails[levelSlot] = NO_INDEX;
-            book.removeLevel(levelSlot);
-            return;
-        }
-
-        book.levelHeads[levelSlot] = nextOrderSlot;
-        orderPrev[nextOrderSlot] = NO_INDEX;
     }
 
     private int allocateOrderSlot() {
@@ -221,12 +182,12 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private List<Order> snapshot(SideBook book) {
-        List<Integer> levelSlots = book.snapshotLevelSlots();
+        List<Integer> levelRefs = book.snapshotLevelRefs();
         List<Order> orders = new ArrayList<>(orderById.size());
         Order.Side side = book.side();
-        for (int levelSlot : levelSlots) {
-            long price = book.levelPrices[levelSlot];
-            for (int orderSlot = book.levelHeads[levelSlot]; orderSlot != NO_INDEX; orderSlot = orderNext[orderSlot]) {
+        for (int levelRef : levelRefs) {
+            long price = book.priceOf(levelRef);
+            for (int orderSlot = book.levelHead(levelRef); orderSlot != NO_INDEX; orderSlot = orderNext[orderSlot]) {
                 orders.add(new Order(orderIds[orderSlot], side, price, orderQuantities[orderSlot]));
             }
         }
@@ -374,22 +335,24 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private static final class SideBook {
-        private static final int INITIAL_LEVEL_CAPACITY = 256;
+        private static final int INITIAL_PAGE_CAPACITY = 256;
         private static final int INITIAL_HEAP_CAPACITY = 256;
         private static final int HEAP_ARITY = 5;
 
         private final boolean buySide;
-        private final LevelMap levels = new LevelMap(256, 0.35f);
+        private final PageMap pages = new PageMap(256, 0.5f);
 
-        private long[] levelPrices = new long[INITIAL_LEVEL_CAPACITY];
-        private long[] levelKeys = new long[INITIAL_LEVEL_CAPACITY];
-        private int[] levelHeads = filledIntArray(INITIAL_LEVEL_CAPACITY, NO_INDEX);
-        private int[] levelTails = filledIntArray(INITIAL_LEVEL_CAPACITY, NO_INDEX);
-        private int[] levelHeapIndex = filledIntArray(INITIAL_LEVEL_CAPACITY, NO_INDEX);
-        private int[] levelMapSlots = filledIntArray(INITIAL_LEVEL_CAPACITY, NO_INDEX);
-        private int levelCapacity = INITIAL_LEVEL_CAPACITY;
-        private int nextLevelSlot;
-        private int freeLevelSlot = NO_INDEX;
+        private long[] pageKeys = new long[INITIAL_PAGE_CAPACITY];
+        private long[] pageActiveMasks = new long[INITIAL_PAGE_CAPACITY];
+        private int[] pageHeapIndex = filledIntArray(INITIAL_PAGE_CAPACITY, NO_INDEX);
+        private int[] pageMapSlots = filledIntArray(INITIAL_PAGE_CAPACITY, NO_INDEX);
+        private int[] pageNextFree = filledIntArray(INITIAL_PAGE_CAPACITY, NO_INDEX);
+        private int pageCapacity = INITIAL_PAGE_CAPACITY;
+        private int nextPageSlot;
+        private int freePageSlot = NO_INDEX;
+
+        private int[] levelHeads = filledIntArray(INITIAL_PAGE_CAPACITY << PAGE_SHIFT, NO_INDEX);
+        private int[] levelTails = filledIntArray(INITIAL_PAGE_CAPACITY << PAGE_SHIFT, NO_INDEX);
 
         private int[] heap = new int[INITIAL_HEAP_CAPACITY];
         private int heapSize;
@@ -398,143 +361,197 @@ public class OrderBookImpl implements OrderBook {
             this.buySide = buySide;
         }
 
-        private int level(long price) {
-            return levels.get(price);
-        }
-
-        private int addLevel(long price) {
-            int levelSlot = allocateLevelSlot();
-            levelPrices[levelSlot] = price;
-            levelKeys[levelSlot] = buySide ? -price : price;
-            levelHeads[levelSlot] = NO_INDEX;
-            levelTails[levelSlot] = NO_INDEX;
-            levels.put(price, levelSlot);
-            push(levelSlot);
-            return levelSlot;
-        }
-
-        private int bestLevel() {
-            return heapSize == 0 ? NO_INDEX : heap[0];
-        }
-
-        private void removeLevel(int levelSlot) {
-            levels.removeValue(levelSlot);
-            removeAt(levelHeapIndex[levelSlot]);
-            releaseLevelSlot(levelSlot);
-        }
-
-        private void push(int levelSlot) {
-            if (heapSize == heap.length) {
-                heap = Arrays.copyOf(heap, heap.length << 1);
+        private int levelRef(long price) {
+            long pageKey = pageKey(price);
+            int pageSlot = pages.get(pageKey);
+            if (pageSlot == NO_INDEX) {
+                return NO_INDEX;
             }
 
-            heap[heapSize] = levelSlot;
-            levelHeapIndex[levelSlot] = heapSize;
-            siftUp(heapSize++);
+            int offset = pageOffset(price);
+            long bit = 1L << offset;
+            return (pageActiveMasks[pageSlot] & bit) == 0 ? NO_INDEX : levelRef(pageSlot, offset);
         }
 
-        private void removeAt(int index) {
-            int lastIndex = --heapSize;
-            int removedLevel = heap[index];
-            int replacement = heap[lastIndex];
-            levelHeapIndex[removedLevel] = NO_INDEX;
+        private int createLevel(long price) {
+            long pageKey = pageKey(price);
+            int pageSlot = pages.get(pageKey);
+            if (pageSlot == NO_INDEX) {
+                pageSlot = allocatePageSlot();
+                resetPage(pageSlot);
+                pageKeys[pageSlot] = pageKey;
+                pages.put(pageKey, pageSlot, pageMapSlots);
+            }
 
-            if (index == lastIndex) {
+            int offset = pageOffset(price);
+            long activeMask = pageActiveMasks[pageSlot];
+            long bit = 1L << offset;
+            if ((activeMask & bit) == 0) {
+                pageActiveMasks[pageSlot] = activeMask | bit;
+                if (activeMask == 0L) {
+                    push(pageSlot);
+                }
+            }
+            return levelRef(pageSlot, offset);
+        }
+
+        private int bestLevelRef() {
+            if (heapSize == 0) {
+                return NO_INDEX;
+            }
+
+            int pageSlot = heap[0];
+            long activeMask = pageActiveMasks[pageSlot];
+            int offset = buySide
+                    ? Long.SIZE - 1 - Long.numberOfLeadingZeros(activeMask)
+                    : Long.numberOfTrailingZeros(activeMask);
+            return levelRef(pageSlot, offset);
+        }
+
+        private long priceOf(int levelRef) {
+            int pageSlot = pageSlot(levelRef);
+            return (pageKeys[pageSlot] << PAGE_SHIFT) | levelOffset(levelRef);
+        }
+
+        private int levelHead(int levelRef) {
+            return levelHeads[levelRef];
+        }
+
+        private void appendOrder(int levelRef, int orderSlot, int[] orderPrev, int[] orderNext) {
+            int tail = levelTails[levelRef];
+            orderPrev[orderSlot] = tail;
+            orderNext[orderSlot] = NO_INDEX;
+            if (tail == NO_INDEX) {
+                levelHeads[levelRef] = orderSlot;
+                levelTails[levelRef] = orderSlot;
                 return;
             }
 
-            heap[index] = replacement;
-            levelHeapIndex[replacement] = index;
-            int parent = (index - 1) / HEAP_ARITY;
-            if (index > 0 && levelKeys[replacement] < levelKeys[heap[parent]]) {
-                siftUp(index);
+            orderNext[tail] = orderSlot;
+            levelTails[levelRef] = orderSlot;
+        }
+
+        private void unlinkOrder(
+                int levelRef,
+                int orderSlot,
+                int prevOrderSlot,
+                int nextOrderSlot,
+                int[] orderPrev,
+                int[] orderNext
+        ) {
+            if (prevOrderSlot == NO_INDEX) {
+                levelHeads[levelRef] = nextOrderSlot;
             } else {
-                siftDown(index);
+                orderNext[prevOrderSlot] = nextOrderSlot;
+            }
+
+            if (nextOrderSlot == NO_INDEX) {
+                levelTails[levelRef] = prevOrderSlot;
+            } else {
+                orderPrev[nextOrderSlot] = prevOrderSlot;
+            }
+
+            if (levelHeads[levelRef] == NO_INDEX) {
+                deactivateLevel(levelRef);
             }
         }
 
-        private void siftUp(int index) {
-            int levelSlot = heap[index];
-            long levelKey = levelKeys[levelSlot];
-            while (index > 0) {
-                int parent = (index - 1) / HEAP_ARITY;
-                int parentSlot = heap[parent];
-                if (levelKey >= levelKeys[parentSlot]) {
-                    break;
+        private void removeMatchedHead(int levelRef, int orderSlot, int nextOrderSlot, int[] orderPrev, int[] orderNext) {
+            orderPrev[orderSlot] = NO_INDEX;
+            orderNext[orderSlot] = NO_INDEX;
+            if (nextOrderSlot == NO_INDEX) {
+                levelHeads[levelRef] = NO_INDEX;
+                levelTails[levelRef] = NO_INDEX;
+                deactivateLevel(levelRef);
+                return;
+            }
+
+            levelHeads[levelRef] = nextOrderSlot;
+            orderPrev[nextOrderSlot] = NO_INDEX;
+        }
+
+        private void deactivateLevel(int levelRef) {
+            int pageSlot = pageSlot(levelRef);
+            long activeMask = pageActiveMasks[pageSlot] & ~(1L << levelOffset(levelRef));
+            pageActiveMasks[pageSlot] = activeMask;
+            if (activeMask == 0L) {
+                pages.removeValue(pageSlot, pageMapSlots);
+                removeAt(pageHeapIndex[pageSlot]);
+                releasePageSlot(pageSlot);
+            }
+        }
+
+        private List<Integer> snapshotLevelRefs() {
+            List<Integer> pageSlots = new ArrayList<>(heapSize);
+            for (int i = 0; i < heapSize; i++) {
+                pageSlots.add(heap[i]);
+            }
+            pageSlots.sort((left, right) -> buySide
+                    ? Long.compare(pageKeys[right], pageKeys[left])
+                    : Long.compare(pageKeys[left], pageKeys[right]));
+
+            List<Integer> levelRefs = new ArrayList<>();
+            for (int pageSlot : pageSlots) {
+                long activeMask = pageActiveMasks[pageSlot];
+                while (activeMask != 0L) {
+                    int offset = buySide
+                            ? Long.SIZE - 1 - Long.numberOfLeadingZeros(activeMask)
+                            : Long.numberOfTrailingZeros(activeMask);
+                    levelRefs.add(levelRef(pageSlot, offset));
+                    activeMask &= ~(1L << offset);
                 }
-
-                heap[index] = parentSlot;
-                levelHeapIndex[parentSlot] = index;
-                index = parent;
             }
-            heap[index] = levelSlot;
-            levelHeapIndex[levelSlot] = index;
+            return levelRefs;
         }
 
-        private void siftDown(int index) {
-            int levelSlot = heap[index];
-            long levelKey = levelKeys[levelSlot];
-            while (true) {
-                int firstChild = index * HEAP_ARITY + 1;
-                if (firstChild >= heapSize) {
-                    break;
-                }
-
-                int bestChild = firstChild;
-                long bestChildKey = levelKeys[heap[firstChild]];
-                int childLimit = Math.min(firstChild + HEAP_ARITY, heapSize);
-                for (int child = firstChild + 1; child < childLimit; child++) {
-                    int childSlot = heap[child];
-                    long childKey = levelKeys[childSlot];
-                    if (childKey < bestChildKey) {
-                        bestChild = child;
-                        bestChildKey = childKey;
-                    }
-                }
-
-                if (bestChildKey >= levelKey) {
-                    break;
-                }
-
-                int childSlot = heap[bestChild];
-                heap[index] = childSlot;
-                levelHeapIndex[childSlot] = index;
-                index = bestChild;
-            }
-
-            heap[index] = levelSlot;
-            levelHeapIndex[levelSlot] = index;
+        private Order.Side side() {
+            return buySide ? Order.Side.BUY : Order.Side.SELL;
         }
 
-        private int allocateLevelSlot() {
-            int levelSlot = freeLevelSlot;
-            if (levelSlot != NO_INDEX) {
-                freeLevelSlot = levelHeads[levelSlot];
-                return levelSlot;
+        private int allocatePageSlot() {
+            int pageSlot = freePageSlot;
+            if (pageSlot != NO_INDEX) {
+                freePageSlot = pageNextFree[pageSlot];
+                pageNextFree[pageSlot] = NO_INDEX;
+                return pageSlot;
             }
 
-            levelSlot = nextLevelSlot++;
-            if (levelSlot == levelCapacity) {
-                growLevelStorage();
+            pageSlot = nextPageSlot++;
+            if (pageSlot == pageCapacity) {
+                growPageStorage();
             }
-            return levelSlot;
+            return pageSlot;
         }
 
-        private void releaseLevelSlot(int levelSlot) {
-            levelMapSlots[levelSlot] = NO_INDEX;
-            levelHeads[levelSlot] = freeLevelSlot;
-            freeLevelSlot = levelSlot;
+        private void releasePageSlot(int pageSlot) {
+            pageHeapIndex[pageSlot] = NO_INDEX;
+            pageMapSlots[pageSlot] = NO_INDEX;
+            pageActiveMasks[pageSlot] = 0L;
+            pageNextFree[pageSlot] = freePageSlot;
+            freePageSlot = pageSlot;
         }
 
-        private void growLevelStorage() {
-            int newCapacity = levelCapacity << 1;
-            levelPrices = Arrays.copyOf(levelPrices, newCapacity);
-            levelKeys = Arrays.copyOf(levelKeys, newCapacity);
-            levelHeads = growIntArray(levelHeads, newCapacity);
-            levelTails = growIntArray(levelTails, newCapacity);
-            levelHeapIndex = growIntArray(levelHeapIndex, newCapacity);
-            levelMapSlots = growIntArray(levelMapSlots, newCapacity);
-            levelCapacity = newCapacity;
+        private void resetPage(int pageSlot) {
+            int from = pageSlot << PAGE_SHIFT;
+            int to = from + PAGE_SIZE;
+            Arrays.fill(levelHeads, from, to, NO_INDEX);
+            Arrays.fill(levelTails, from, to, NO_INDEX);
+            pageHeapIndex[pageSlot] = NO_INDEX;
+            pageMapSlots[pageSlot] = NO_INDEX;
+            pageNextFree[pageSlot] = NO_INDEX;
+            pageActiveMasks[pageSlot] = 0L;
+        }
+
+        private void growPageStorage() {
+            int newCapacity = pageCapacity << 1;
+            pageKeys = Arrays.copyOf(pageKeys, newCapacity);
+            pageActiveMasks = Arrays.copyOf(pageActiveMasks, newCapacity);
+            pageHeapIndex = growIntArray(pageHeapIndex, newCapacity);
+            pageMapSlots = growIntArray(pageMapSlots, newCapacity);
+            pageNextFree = growIntArray(pageNextFree, newCapacity);
+            levelHeads = growIntArray(levelHeads, newCapacity << PAGE_SHIFT);
+            levelTails = growIntArray(levelTails, newCapacity << PAGE_SHIFT);
+            pageCapacity = newCapacity;
         }
 
         private int[] growIntArray(int[] source, int newCapacity) {
@@ -544,29 +561,117 @@ public class OrderBookImpl implements OrderBook {
             return copy;
         }
 
-        private List<Integer> snapshotLevelSlots() {
-            List<Integer> levelSlots = new ArrayList<>(heapSize);
-            for (int i = 0; i < heapSize; i++) {
-                levelSlots.add(heap[i]);
+        private void push(int pageSlot) {
+            if (heapSize == heap.length) {
+                heap = Arrays.copyOf(heap, heap.length << 1);
             }
-            levelSlots.sort((left, right) -> buySide
-                    ? Long.compare(levelPrices[right], levelPrices[left])
-                    : Long.compare(levelPrices[left], levelPrices[right]));
-            return levelSlots;
+
+            heap[heapSize] = pageSlot;
+            pageHeapIndex[pageSlot] = heapSize;
+            siftUp(heapSize++);
         }
 
-        private Order.Side side() {
-            return buySide ? Order.Side.BUY : Order.Side.SELL;
+        private void removeAt(int index) {
+            int lastIndex = --heapSize;
+            int removedPage = heap[index];
+            int replacement = heap[lastIndex];
+            pageHeapIndex[removedPage] = NO_INDEX;
+
+            if (index == lastIndex) {
+                return;
+            }
+
+            heap[index] = replacement;
+            pageHeapIndex[replacement] = index;
+            int parent = (index - 1) / HEAP_ARITY;
+            if (index > 0 && betterPage(replacement, heap[parent])) {
+                siftUp(index);
+            } else {
+                siftDown(index);
+            }
         }
 
-        private final class LevelMap {
+        private void siftUp(int index) {
+            int pageSlot = heap[index];
+            while (index > 0) {
+                int parent = (index - 1) / HEAP_ARITY;
+                int parentSlot = heap[parent];
+                if (!betterPage(pageSlot, parentSlot)) {
+                    break;
+                }
+
+                heap[index] = parentSlot;
+                pageHeapIndex[parentSlot] = index;
+                index = parent;
+            }
+            heap[index] = pageSlot;
+            pageHeapIndex[pageSlot] = index;
+        }
+
+        private void siftDown(int index) {
+            int pageSlot = heap[index];
+            while (true) {
+                int firstChild = index * HEAP_ARITY + 1;
+                if (firstChild >= heapSize) {
+                    break;
+                }
+
+                int bestChild = firstChild;
+                int childLimit = Math.min(firstChild + HEAP_ARITY, heapSize);
+                for (int child = firstChild + 1; child < childLimit; child++) {
+                    if (betterPage(heap[child], heap[bestChild])) {
+                        bestChild = child;
+                    }
+                }
+
+                int childSlot = heap[bestChild];
+                if (!betterPage(childSlot, pageSlot)) {
+                    break;
+                }
+
+                heap[index] = childSlot;
+                pageHeapIndex[childSlot] = index;
+                index = bestChild;
+            }
+
+            heap[index] = pageSlot;
+            pageHeapIndex[pageSlot] = index;
+        }
+
+        private boolean betterPage(int leftPageSlot, int rightPageSlot) {
+            return buySide
+                    ? pageKeys[leftPageSlot] > pageKeys[rightPageSlot]
+                    : pageKeys[leftPageSlot] < pageKeys[rightPageSlot];
+        }
+
+        private long pageKey(long price) {
+            return price >> PAGE_SHIFT;
+        }
+
+        private int pageOffset(long price) {
+            return (int) (price & PAGE_MASK);
+        }
+
+        private int pageSlot(int levelRef) {
+            return levelRef >>> PAGE_SHIFT;
+        }
+
+        private int levelOffset(int levelRef) {
+            return levelRef & PAGE_MASK;
+        }
+
+        private int levelRef(int pageSlot, int offset) {
+            return (pageSlot << PAGE_SHIFT) | offset;
+        }
+
+        private final class PageMap {
             private long[] keys;
             private int[] values;
             private int size;
             private final float loadFactor;
             private int resizeThreshold;
 
-            private LevelMap(int capacity, float loadFactor) {
+            private PageMap(int capacity, float loadFactor) {
                 int actualCapacity = 1;
                 while (actualCapacity < capacity) {
                     actualCapacity <<= 1;
@@ -592,9 +697,9 @@ public class OrderBookImpl implements OrderBook {
                 }
             }
 
-            private void put(long key, int value) {
+            private void put(long key, int value, int[] slotIndexes) {
                 if (size >= resizeThreshold) {
-                    resize();
+                    resize(slotIndexes);
                 }
 
                 int mask = values.length - 1;
@@ -604,32 +709,30 @@ public class OrderBookImpl implements OrderBook {
                     if (current == NO_INDEX) {
                         keys[index] = key;
                         values[index] = value;
-                        levelMapSlots[value] = index;
+                        slotIndexes[value] = index;
                         size++;
                         return;
                     }
                     if (keys[index] == key) {
-                        if (current != NO_INDEX) {
-                            levelMapSlots[current] = NO_INDEX;
-                        }
+                        slotIndexes[current] = NO_INDEX;
                         values[index] = value;
-                        levelMapSlots[value] = index;
+                        slotIndexes[value] = index;
                         return;
                     }
                     index = (index + 1) & mask;
                 }
             }
 
-            private void removeValue(int value) {
-                int index = levelMapSlots[value];
+            private void removeValue(int value, int[] slotIndexes) {
+                int index = slotIndexes[value];
                 if (index == NO_INDEX) {
                     return;
                 }
-                levelMapSlots[value] = NO_INDEX;
-                deleteIndex(index);
+                slotIndexes[value] = NO_INDEX;
+                deleteIndex(index, slotIndexes);
             }
 
-            private void deleteIndex(int index) {
+            private void deleteIndex(int index, int[] slotIndexes) {
                 int mask = values.length - 1;
                 size--;
                 int gap = index;
@@ -645,14 +748,14 @@ public class OrderBookImpl implements OrderBook {
                     if (((next - home) & mask) >= ((gap - home) & mask)) {
                         keys[gap] = keys[next];
                         values[gap] = value;
-                        levelMapSlots[value] = gap;
+                        slotIndexes[value] = gap;
                         gap = next;
                     }
                     next = (next + 1) & mask;
                 }
             }
 
-            private void resize() {
+            private void resize(int[] slotIndexes) {
                 long[] oldKeys = keys;
                 int[] oldValues = values;
                 keys = new long[oldKeys.length << 1];
@@ -664,13 +767,13 @@ public class OrderBookImpl implements OrderBook {
                 for (int i = 0; i < oldValues.length; i++) {
                     int value = oldValues[i];
                     if (value != NO_INDEX) {
-                        reinsert(oldKeys[i], value);
+                        reinsert(oldKeys[i], value, slotIndexes);
                     }
                 }
                 size = oldSize;
             }
 
-            private void reinsert(long key, int value) {
+            private void reinsert(long key, int value, int[] slotIndexes) {
                 int mask = values.length - 1;
                 int index = mix(key) & mask;
                 while (values[index] != NO_INDEX) {
@@ -678,7 +781,7 @@ public class OrderBookImpl implements OrderBook {
                 }
                 keys[index] = key;
                 values[index] = value;
-                levelMapSlots[value] = index;
+                slotIndexes[value] = index;
                 size++;
             }
 
@@ -687,160 +790,6 @@ public class OrderBookImpl implements OrderBook {
                 mixed ^= mixed >>> 17;
                 return (int) mixed;
             }
-        }
-    }
-
-    private static final class LongIntMap {
-        private long[] keys;
-        private int[] values;
-        private int size;
-        private final float loadFactor;
-        private final int missingValue;
-        private int resizeThreshold;
-
-        private LongIntMap(int capacity, float loadFactor, int missingValue) {
-            int actualCapacity = 1;
-            while (actualCapacity < capacity) {
-                actualCapacity <<= 1;
-            }
-            this.loadFactor = loadFactor;
-            this.missingValue = missingValue;
-            keys = new long[actualCapacity];
-            values = filledIntArray(actualCapacity, missingValue);
-            resizeThreshold = (int) (actualCapacity * loadFactor);
-        }
-
-        private int size() {
-            return size;
-        }
-
-        private int get(long key) {
-            int mask = values.length - 1;
-            int index = mix(key) & mask;
-            while (true) {
-                int value = values[index];
-                if (value == missingValue) {
-                    return missingValue;
-                }
-                if (keys[index] == key) {
-                    return value;
-                }
-                index = (index + 1) & mask;
-            }
-        }
-
-        private void put(long key, int value, int[] slotIndexes) {
-            if (size >= resizeThreshold) {
-                resize(slotIndexes);
-            }
-
-            int mask = values.length - 1;
-            int index = mix(key) & mask;
-            while (true) {
-                int current = values[index];
-                if (current == missingValue) {
-                    keys[index] = key;
-                    values[index] = value;
-                    slotIndexes[value] = index;
-                    size++;
-                    return;
-                }
-                if (keys[index] == key) {
-                    if (current != missingValue) {
-                        slotIndexes[current] = missingValue;
-                    }
-                    values[index] = value;
-                    slotIndexes[value] = index;
-                    return;
-                }
-                index = (index + 1) & mask;
-            }
-        }
-
-        private int remove(long key, int[] slotIndexes) {
-            int mask = values.length - 1;
-            int index = mix(key) & mask;
-            while (true) {
-                int current = values[index];
-                if (current == missingValue) {
-                    return missingValue;
-                }
-                if (keys[index] == key) {
-                    int removed = current;
-                    slotIndexes[removed] = missingValue;
-                    deleteIndex(index, slotIndexes);
-                    return removed;
-                }
-                index = (index + 1) & mask;
-            }
-        }
-
-        private void removeValue(int value, int[] slotIndexes) {
-            int index = slotIndexes[value];
-            if (index == missingValue) {
-                return;
-            }
-            slotIndexes[value] = missingValue;
-            deleteIndex(index, slotIndexes);
-        }
-
-        private void deleteIndex(int index, int[] slotIndexes) {
-            int mask = values.length - 1;
-            size--;
-            int gap = index;
-            int next = (index + 1) & mask;
-            while (true) {
-                int value = values[next];
-                if (value == missingValue) {
-                    values[gap] = missingValue;
-                    return;
-                }
-
-                int home = mix(keys[next]) & mask;
-                if (((next - home) & mask) >= ((gap - home) & mask)) {
-                    keys[gap] = keys[next];
-                    values[gap] = value;
-                    slotIndexes[value] = gap;
-                    gap = next;
-                }
-                next = (next + 1) & mask;
-            }
-        }
-
-        private void resize(int[] slotIndexes) {
-            long[] oldKeys = keys;
-            int[] oldValues = values;
-            keys = new long[oldKeys.length << 1];
-            values = filledIntArray(oldValues.length << 1, missingValue);
-            resizeThreshold = (int) (values.length * loadFactor);
-
-            int oldSize = size;
-            size = 0;
-            for (int i = 0; i < oldValues.length; i++) {
-                int value = oldValues[i];
-                if (value != missingValue) {
-                    reinsert(oldKeys[i], value, slotIndexes);
-                }
-            }
-            size = oldSize;
-        }
-
-        private void reinsert(long key, int value, int[] slotIndexes) {
-            int mask = values.length - 1;
-            int index = mix(key) & mask;
-            while (values[index] != missingValue) {
-                index = (index + 1) & mask;
-            }
-            keys[index] = key;
-            values[index] = value;
-            slotIndexes[value] = index;
-            size++;
-        }
-
-        private int mix(long key) {
-            long mixed = key ^ (key >>> 33);
-            mixed ^= mixed >>> 17;
-            return (int) mixed;
         }
     }
 }
