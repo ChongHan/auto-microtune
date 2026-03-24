@@ -10,6 +10,9 @@ import java.util.Objects;
 public class OrderBookImpl implements OrderBook {
     private static final int NO_INDEX = -1;
     private static final int ASK_LEVEL_FLAG = Integer.MIN_VALUE;
+    private static final int PAGE_SHIFT = 6;
+    private static final int PAGE_SIZE = 1 << PAGE_SHIFT;
+    private static final int PAGE_MASK = PAGE_SIZE - 1;
 
     private final SideBook bids = new SideBook(true);
     private final SideBook asks = new SideBook(false);
@@ -95,7 +98,7 @@ public class OrderBookImpl implements OrderBook {
                 break;
             }
 
-            long matchedPrice = oppositeBook.levelPrices[levelSlot];
+            long matchedPrice = oppositeBook.priceOf(levelSlot);
             if (!crosses(incomingSide, incomingPrice, matchedPrice)) {
                 break;
             }
@@ -225,7 +228,7 @@ public class OrderBookImpl implements OrderBook {
         List<Order> orders = new ArrayList<>(orderById.size());
         Order.Side side = book.side();
         for (int levelSlot : levelSlots) {
-            long price = book.levelPrices[levelSlot];
+            long price = book.priceOf(levelSlot);
             for (int orderSlot = book.levelHeads[levelSlot]; orderSlot != NO_INDEX; orderSlot = orderNext[orderSlot]) {
                 orders.add(new Order(orderIds[orderSlot], side, price, orderQuantities[orderSlot]));
             }
@@ -374,167 +377,287 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private static final class SideBook {
-        private static final int INITIAL_LEVEL_CAPACITY = 256;
-        private static final int INITIAL_HEAP_CAPACITY = 256;
-        private static final int HEAP_ARITY = 5;
+        private static final int INITIAL_PAGE_SLOT_CAPACITY = 256;
+        private static final int INITIAL_DIRECTORY_CAPACITY = 4096;
 
         private final boolean buySide;
-        private final LevelMap levels = new LevelMap(256, 0.35f);
 
-        private long[] levelPrices = new long[INITIAL_LEVEL_CAPACITY];
-        private long[] levelKeys = new long[INITIAL_LEVEL_CAPACITY];
-        private int[] levelHeads = filledIntArray(INITIAL_LEVEL_CAPACITY, NO_INDEX);
-        private int[] levelTails = filledIntArray(INITIAL_LEVEL_CAPACITY, NO_INDEX);
-        private int[] levelHeapIndex = filledIntArray(INITIAL_LEVEL_CAPACITY, NO_INDEX);
-        private int[] levelMapSlots = filledIntArray(INITIAL_LEVEL_CAPACITY, NO_INDEX);
-        private int levelCapacity = INITIAL_LEVEL_CAPACITY;
-        private int nextLevelSlot;
-        private int freeLevelSlot = NO_INDEX;
+        private long basePageKey;
+        private boolean directoryInitialized;
+        private int[] directorySlots = filledIntArray(INITIAL_DIRECTORY_CAPACITY, NO_INDEX);
+        private long[] nonEmptyPageWords = new long[(INITIAL_DIRECTORY_CAPACITY + Long.SIZE - 1) / Long.SIZE];
+        private long[] nonEmptyPageWordSummary = new long[(nonEmptyPageWords.length + Long.SIZE - 1) / Long.SIZE];
 
-        private int[] heap = new int[INITIAL_HEAP_CAPACITY];
-        private int heapSize;
+        private long[] pageKeys = new long[INITIAL_PAGE_SLOT_CAPACITY];
+        private long[] pageMasks = new long[INITIAL_PAGE_SLOT_CAPACITY];
+        private int[] pageDirectoryIndexes = filledIntArray(INITIAL_PAGE_SLOT_CAPACITY, NO_INDEX);
+        private int[] pageNextFree = filledIntArray(INITIAL_PAGE_SLOT_CAPACITY, NO_INDEX);
+        private int pageSlotCapacity = INITIAL_PAGE_SLOT_CAPACITY;
+        private int nextPageSlot;
+        private int freePageSlot = NO_INDEX;
+
+        private int[] levelHeads = filledIntArray(INITIAL_PAGE_SLOT_CAPACITY << PAGE_SHIFT, NO_INDEX);
+        private int[] levelTails = filledIntArray(INITIAL_PAGE_SLOT_CAPACITY << PAGE_SHIFT, NO_INDEX);
 
         private SideBook(boolean buySide) {
             this.buySide = buySide;
         }
 
         private int level(long price) {
-            return levels.get(price);
+            if (!directoryInitialized) {
+                return NO_INDEX;
+            }
+
+            long pageKey = price >> PAGE_SHIFT;
+            int directoryIndex = directoryIndex(pageKey);
+            if (directoryIndex == NO_INDEX) {
+                return NO_INDEX;
+            }
+
+            int pageSlot = directorySlots[directoryIndex];
+            if (pageSlot == NO_INDEX) {
+                return NO_INDEX;
+            }
+
+            int offset = (int) (price & PAGE_MASK);
+            return (pageMasks[pageSlot] & (1L << offset)) == 0 ? NO_INDEX : levelRef(pageSlot, offset);
         }
 
         private int addLevel(long price) {
-            int levelSlot = allocateLevelSlot();
-            levelPrices[levelSlot] = price;
-            levelKeys[levelSlot] = buySide ? -price : price;
-            levelHeads[levelSlot] = NO_INDEX;
-            levelTails[levelSlot] = NO_INDEX;
-            levels.put(price, levelSlot);
-            push(levelSlot);
-            return levelSlot;
+            long pageKey = price >> PAGE_SHIFT;
+            ensureDirectoryContains(pageKey);
+            int directoryIndex = directoryIndex(pageKey);
+            int pageSlot = directorySlots[directoryIndex];
+            if (pageSlot == NO_INDEX) {
+                pageSlot = allocatePageSlot();
+                pageKeys[pageSlot] = pageKey;
+                pageMasks[pageSlot] = 0L;
+                pageDirectoryIndexes[pageSlot] = directoryIndex;
+                directorySlots[directoryIndex] = pageSlot;
+            }
+
+            int offset = (int) (price & PAGE_MASK);
+            long mask = pageMasks[pageSlot];
+            long bit = 1L << offset;
+            if ((mask & bit) == 0) {
+                pageMasks[pageSlot] = mask | bit;
+                if (mask == 0L) {
+                    markPageActive(directoryIndex);
+                }
+            }
+            return levelRef(pageSlot, offset);
         }
 
         private int bestLevel() {
-            return heapSize == 0 ? NO_INDEX : heap[0];
+            int directoryIndex = bestPageIndex();
+            if (directoryIndex == NO_INDEX) {
+                return NO_INDEX;
+            }
+
+            int pageSlot = directorySlots[directoryIndex];
+            long mask = pageMasks[pageSlot];
+            int offset = buySide
+                    ? Long.SIZE - 1 - Long.numberOfLeadingZeros(mask)
+                    : Long.numberOfTrailingZeros(mask);
+            return levelRef(pageSlot, offset);
+        }
+
+        private long priceOf(int levelSlot) {
+            int pageSlot = pageSlot(levelSlot);
+            return (pageKeys[pageSlot] << PAGE_SHIFT) | levelOffset(levelSlot);
         }
 
         private void removeLevel(int levelSlot) {
-            levels.removeValue(levelSlot);
-            removeAt(levelHeapIndex[levelSlot]);
-            releaseLevelSlot(levelSlot);
+            int pageSlot = pageSlot(levelSlot);
+            long remainingMask = pageMasks[pageSlot] & ~(1L << levelOffset(levelSlot));
+            pageMasks[pageSlot] = remainingMask;
+            if (remainingMask == 0L) {
+                int directoryIndex = pageDirectoryIndexes[pageSlot];
+                directorySlots[directoryIndex] = NO_INDEX;
+                clearPageActive(directoryIndex);
+                releasePageSlot(pageSlot);
+            }
         }
 
-        private void push(int levelSlot) {
-            if (heapSize == heap.length) {
-                heap = Arrays.copyOf(heap, heap.length << 1);
+        private List<Integer> snapshotLevelSlots() {
+            List<Integer> levelSlots = new ArrayList<>();
+            if (!directoryInitialized) {
+                return levelSlots;
             }
 
-            heap[heapSize] = levelSlot;
-            levelHeapIndex[levelSlot] = heapSize;
-            siftUp(heapSize++);
+            if (buySide) {
+                for (int directoryIndex = directorySlots.length - 1; directoryIndex >= 0; directoryIndex--) {
+                    int pageSlot = directorySlots[directoryIndex];
+                    if (pageSlot == NO_INDEX) {
+                        continue;
+                    }
+
+                    long mask = pageMasks[pageSlot];
+                    while (mask != 0L) {
+                        int offset = Long.SIZE - 1 - Long.numberOfLeadingZeros(mask);
+                        levelSlots.add(levelRef(pageSlot, offset));
+                        mask &= ~(1L << offset);
+                    }
+                }
+            } else {
+                for (int directoryIndex = 0; directoryIndex < directorySlots.length; directoryIndex++) {
+                    int pageSlot = directorySlots[directoryIndex];
+                    if (pageSlot == NO_INDEX) {
+                        continue;
+                    }
+
+                    long mask = pageMasks[pageSlot];
+                    while (mask != 0L) {
+                        int offset = Long.numberOfTrailingZeros(mask);
+                        levelSlots.add(levelRef(pageSlot, offset));
+                        mask &= mask - 1;
+                    }
+                }
+            }
+            return levelSlots;
         }
 
-        private void removeAt(int index) {
-            int lastIndex = --heapSize;
-            int removedLevel = heap[index];
-            int replacement = heap[lastIndex];
-            levelHeapIndex[removedLevel] = NO_INDEX;
+        private Order.Side side() {
+            return buySide ? Order.Side.BUY : Order.Side.SELL;
+        }
 
-            if (index == lastIndex) {
+        private void ensureDirectoryContains(long pageKey) {
+            if (!directoryInitialized) {
+                basePageKey = pageKey - (directorySlots.length >>> 1);
+                directoryInitialized = true;
                 return;
             }
 
-            heap[index] = replacement;
-            levelHeapIndex[replacement] = index;
-            int parent = (index - 1) / HEAP_ARITY;
-            if (index > 0 && levelKeys[replacement] < levelKeys[heap[parent]]) {
-                siftUp(index);
-            } else {
-                siftDown(index);
+            if (directoryIndex(pageKey) != NO_INDEX) {
+                return;
+            }
+
+            growDirectory(pageKey);
+        }
+
+        private int directoryIndex(long pageKey) {
+            long index = pageKey - basePageKey;
+            return index >= 0 && index < directorySlots.length ? (int) index : NO_INDEX;
+        }
+
+        private void growDirectory(long requiredPageKey) {
+            int oldCapacity = directorySlots.length;
+            int newCapacity = oldCapacity;
+            long newBase = basePageKey;
+            do {
+                newCapacity <<= 1;
+                newBase = basePageKey - ((long) (newCapacity - oldCapacity) >>> 1);
+            } while (requiredPageKey < newBase || requiredPageKey >= newBase + newCapacity);
+
+            int[] oldDirectorySlots = directorySlots;
+            directorySlots = filledIntArray(newCapacity, NO_INDEX);
+            int shift = (int) (basePageKey - newBase);
+            System.arraycopy(oldDirectorySlots, 0, directorySlots, shift, oldCapacity);
+            basePageKey = newBase;
+
+            nonEmptyPageWords = new long[(newCapacity + Long.SIZE - 1) / Long.SIZE];
+            nonEmptyPageWordSummary = new long[(nonEmptyPageWords.length + Long.SIZE - 1) / Long.SIZE];
+            rebuildDirectoryState();
+        }
+
+        private void rebuildDirectoryState() {
+            Arrays.fill(nonEmptyPageWords, 0L);
+            Arrays.fill(nonEmptyPageWordSummary, 0L);
+            Arrays.fill(pageDirectoryIndexes, NO_INDEX);
+            for (int directoryIndex = 0; directoryIndex < directorySlots.length; directoryIndex++) {
+                int pageSlot = directorySlots[directoryIndex];
+                if (pageSlot == NO_INDEX) {
+                    continue;
+                }
+
+                pageDirectoryIndexes[pageSlot] = directoryIndex;
+                if (pageMasks[pageSlot] != 0L) {
+                    markPageActive(directoryIndex);
+                }
             }
         }
 
-        private void siftUp(int index) {
-            int levelSlot = heap[index];
-            long levelKey = levelKeys[levelSlot];
-            while (index > 0) {
-                int parent = (index - 1) / HEAP_ARITY;
-                int parentSlot = heap[parent];
-                if (levelKey >= levelKeys[parentSlot]) {
-                    break;
-                }
-
-                heap[index] = parentSlot;
-                levelHeapIndex[parentSlot] = index;
-                index = parent;
+        private void markPageActive(int directoryIndex) {
+            int pageWordIndex = directoryIndex >>> 6;
+            long pageBit = 1L << (directoryIndex & PAGE_MASK);
+            long oldPageWord = nonEmptyPageWords[pageWordIndex];
+            nonEmptyPageWords[pageWordIndex] = oldPageWord | pageBit;
+            if (oldPageWord == 0L) {
+                int summaryIndex = pageWordIndex >>> 6;
+                nonEmptyPageWordSummary[summaryIndex] |= 1L << (pageWordIndex & PAGE_MASK);
             }
-            heap[index] = levelSlot;
-            levelHeapIndex[levelSlot] = index;
         }
 
-        private void siftDown(int index) {
-            int levelSlot = heap[index];
-            long levelKey = levelKeys[levelSlot];
-            while (true) {
-                int firstChild = index * HEAP_ARITY + 1;
-                if (firstChild >= heapSize) {
-                    break;
-                }
+        private void clearPageActive(int directoryIndex) {
+            int pageWordIndex = directoryIndex >>> 6;
+            long pageBit = 1L << (directoryIndex & PAGE_MASK);
+            long newPageWord = nonEmptyPageWords[pageWordIndex] & ~pageBit;
+            nonEmptyPageWords[pageWordIndex] = newPageWord;
+            if (newPageWord == 0L) {
+                int summaryIndex = pageWordIndex >>> 6;
+                nonEmptyPageWordSummary[summaryIndex] &= ~(1L << (pageWordIndex & PAGE_MASK));
+            }
+        }
 
-                int bestChild = firstChild;
-                long bestChildKey = levelKeys[heap[firstChild]];
-                int childLimit = Math.min(firstChild + HEAP_ARITY, heapSize);
-                for (int child = firstChild + 1; child < childLimit; child++) {
-                    int childSlot = heap[child];
-                    long childKey = levelKeys[childSlot];
-                    if (childKey < bestChildKey) {
-                        bestChild = child;
-                        bestChildKey = childKey;
+        private int bestPageIndex() {
+            if (buySide) {
+                for (int summaryIndex = nonEmptyPageWordSummary.length - 1; summaryIndex >= 0; summaryIndex--) {
+                    long summaryWord = nonEmptyPageWordSummary[summaryIndex];
+                    if (summaryWord == 0L) {
+                        continue;
                     }
+
+                    int pageWordIndex = (summaryIndex << 6) | (Long.SIZE - 1 - Long.numberOfLeadingZeros(summaryWord));
+                    long pageWord = nonEmptyPageWords[pageWordIndex];
+                    return (pageWordIndex << 6) | (Long.SIZE - 1 - Long.numberOfLeadingZeros(pageWord));
+                }
+                return NO_INDEX;
+            }
+
+            for (int summaryIndex = 0; summaryIndex < nonEmptyPageWordSummary.length; summaryIndex++) {
+                long summaryWord = nonEmptyPageWordSummary[summaryIndex];
+                if (summaryWord == 0L) {
+                    continue;
                 }
 
-                if (bestChildKey >= levelKey) {
-                    break;
-                }
-
-                int childSlot = heap[bestChild];
-                heap[index] = childSlot;
-                levelHeapIndex[childSlot] = index;
-                index = bestChild;
+                int pageWordIndex = (summaryIndex << 6) | Long.numberOfTrailingZeros(summaryWord);
+                long pageWord = nonEmptyPageWords[pageWordIndex];
+                return (pageWordIndex << 6) | Long.numberOfTrailingZeros(pageWord);
             }
-
-            heap[index] = levelSlot;
-            levelHeapIndex[levelSlot] = index;
+            return NO_INDEX;
         }
 
-        private int allocateLevelSlot() {
-            int levelSlot = freeLevelSlot;
-            if (levelSlot != NO_INDEX) {
-                freeLevelSlot = levelHeads[levelSlot];
-                return levelSlot;
+        private int allocatePageSlot() {
+            int pageSlot = freePageSlot;
+            if (pageSlot != NO_INDEX) {
+                freePageSlot = pageNextFree[pageSlot];
+                pageNextFree[pageSlot] = NO_INDEX;
+                return pageSlot;
             }
 
-            levelSlot = nextLevelSlot++;
-            if (levelSlot == levelCapacity) {
-                growLevelStorage();
+            pageSlot = nextPageSlot++;
+            if (pageSlot == pageSlotCapacity) {
+                growPageStorage();
             }
-            return levelSlot;
+            return pageSlot;
         }
 
-        private void releaseLevelSlot(int levelSlot) {
-            levelMapSlots[levelSlot] = NO_INDEX;
-            levelHeads[levelSlot] = freeLevelSlot;
-            freeLevelSlot = levelSlot;
+        private void releasePageSlot(int pageSlot) {
+            pageMasks[pageSlot] = 0L;
+            pageDirectoryIndexes[pageSlot] = NO_INDEX;
+            pageNextFree[pageSlot] = freePageSlot;
+            freePageSlot = pageSlot;
         }
 
-        private void growLevelStorage() {
-            int newCapacity = levelCapacity << 1;
-            levelPrices = Arrays.copyOf(levelPrices, newCapacity);
-            levelKeys = Arrays.copyOf(levelKeys, newCapacity);
-            levelHeads = growIntArray(levelHeads, newCapacity);
-            levelTails = growIntArray(levelTails, newCapacity);
-            levelHeapIndex = growIntArray(levelHeapIndex, newCapacity);
-            levelMapSlots = growIntArray(levelMapSlots, newCapacity);
-            levelCapacity = newCapacity;
+        private void growPageStorage() {
+            int newCapacity = pageSlotCapacity << 1;
+            pageKeys = Arrays.copyOf(pageKeys, newCapacity);
+            pageMasks = Arrays.copyOf(pageMasks, newCapacity);
+            pageDirectoryIndexes = growIntArray(pageDirectoryIndexes, newCapacity);
+            pageNextFree = growIntArray(pageNextFree, newCapacity);
+            levelHeads = growIntArray(levelHeads, newCapacity << PAGE_SHIFT);
+            levelTails = growIntArray(levelTails, newCapacity << PAGE_SHIFT);
+            pageSlotCapacity = newCapacity;
         }
 
         private int[] growIntArray(int[] source, int newCapacity) {
@@ -544,149 +667,16 @@ public class OrderBookImpl implements OrderBook {
             return copy;
         }
 
-        private List<Integer> snapshotLevelSlots() {
-            List<Integer> levelSlots = new ArrayList<>(heapSize);
-            for (int i = 0; i < heapSize; i++) {
-                levelSlots.add(heap[i]);
-            }
-            levelSlots.sort((left, right) -> buySide
-                    ? Long.compare(levelPrices[right], levelPrices[left])
-                    : Long.compare(levelPrices[left], levelPrices[right]));
-            return levelSlots;
+        private int pageSlot(int levelSlot) {
+            return levelSlot >>> PAGE_SHIFT;
         }
 
-        private Order.Side side() {
-            return buySide ? Order.Side.BUY : Order.Side.SELL;
+        private int levelOffset(int levelSlot) {
+            return levelSlot & PAGE_MASK;
         }
 
-        private final class LevelMap {
-            private long[] keys;
-            private int[] values;
-            private int size;
-            private final float loadFactor;
-            private int resizeThreshold;
-
-            private LevelMap(int capacity, float loadFactor) {
-                int actualCapacity = 1;
-                while (actualCapacity < capacity) {
-                    actualCapacity <<= 1;
-                }
-                this.loadFactor = loadFactor;
-                keys = new long[actualCapacity];
-                values = filledIntArray(actualCapacity, NO_INDEX);
-                resizeThreshold = (int) (actualCapacity * loadFactor);
-            }
-
-            private int get(long key) {
-                int mask = values.length - 1;
-                int index = mix(key) & mask;
-                while (true) {
-                    int value = values[index];
-                    if (value == NO_INDEX) {
-                        return NO_INDEX;
-                    }
-                    if (keys[index] == key) {
-                        return value;
-                    }
-                    index = (index + 1) & mask;
-                }
-            }
-
-            private void put(long key, int value) {
-                if (size >= resizeThreshold) {
-                    resize();
-                }
-
-                int mask = values.length - 1;
-                int index = mix(key) & mask;
-                while (true) {
-                    int current = values[index];
-                    if (current == NO_INDEX) {
-                        keys[index] = key;
-                        values[index] = value;
-                        levelMapSlots[value] = index;
-                        size++;
-                        return;
-                    }
-                    if (keys[index] == key) {
-                        if (current != NO_INDEX) {
-                            levelMapSlots[current] = NO_INDEX;
-                        }
-                        values[index] = value;
-                        levelMapSlots[value] = index;
-                        return;
-                    }
-                    index = (index + 1) & mask;
-                }
-            }
-
-            private void removeValue(int value) {
-                int index = levelMapSlots[value];
-                if (index == NO_INDEX) {
-                    return;
-                }
-                levelMapSlots[value] = NO_INDEX;
-                deleteIndex(index);
-            }
-
-            private void deleteIndex(int index) {
-                int mask = values.length - 1;
-                size--;
-                int gap = index;
-                int next = (index + 1) & mask;
-                while (true) {
-                    int value = values[next];
-                    if (value == NO_INDEX) {
-                        values[gap] = NO_INDEX;
-                        return;
-                    }
-
-                    int home = mix(keys[next]) & mask;
-                    if (((next - home) & mask) >= ((gap - home) & mask)) {
-                        keys[gap] = keys[next];
-                        values[gap] = value;
-                        levelMapSlots[value] = gap;
-                        gap = next;
-                    }
-                    next = (next + 1) & mask;
-                }
-            }
-
-            private void resize() {
-                long[] oldKeys = keys;
-                int[] oldValues = values;
-                keys = new long[oldKeys.length << 1];
-                values = filledIntArray(oldValues.length << 1, NO_INDEX);
-                resizeThreshold = (int) (values.length * loadFactor);
-
-                int oldSize = size;
-                size = 0;
-                for (int i = 0; i < oldValues.length; i++) {
-                    int value = oldValues[i];
-                    if (value != NO_INDEX) {
-                        reinsert(oldKeys[i], value);
-                    }
-                }
-                size = oldSize;
-            }
-
-            private void reinsert(long key, int value) {
-                int mask = values.length - 1;
-                int index = mix(key) & mask;
-                while (values[index] != NO_INDEX) {
-                    index = (index + 1) & mask;
-                }
-                keys[index] = key;
-                values[index] = value;
-                levelMapSlots[value] = index;
-                size++;
-            }
-
-            private int mix(long key) {
-                long mixed = key ^ (key >>> 33);
-                mixed ^= mixed >>> 17;
-                return (int) mixed;
-            }
+        private int levelRef(int pageSlot, int levelOffset) {
+            return (pageSlot << PAGE_SHIFT) | levelOffset;
         }
     }
 
