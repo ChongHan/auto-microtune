@@ -11,8 +11,7 @@ public class OrderBookImpl implements OrderBook {
     private static final int NO_INDEX = -1;
     private static final int ASK_LEVEL_FLAG = Integer.MIN_VALUE;
     private static final int PAGE_SHIFT = 6;
-    private static final int PAGE_SIZE = 1 << PAGE_SHIFT;
-    private static final int PAGE_MASK = PAGE_SIZE - 1;
+    private static final int PAGE_MASK = (1 << PAGE_SHIFT) - 1;
 
     private final SideBook bids = new SideBook(true);
     private final SideBook asks = new SideBook(false);
@@ -150,8 +149,7 @@ public class OrderBookImpl implements OrderBook {
             orderPrev[nextOrderSlot] = prevOrderSlot;
         }
 
-        orderPrev[orderSlot] = NO_INDEX;
-        orderNext[orderSlot] = NO_INDEX;
+        clearOrderLinks(orderSlot);
         if (book.levelHeads[levelSlot] == NO_INDEX) {
             book.removeLevel(levelSlot);
         }
@@ -172,8 +170,7 @@ public class OrderBookImpl implements OrderBook {
     }
 
     private void removeMatchedHead(SideBook book, int levelSlot, int orderSlot, int nextOrderSlot) {
-        orderPrev[orderSlot] = NO_INDEX;
-        orderNext[orderSlot] = NO_INDEX;
+        clearOrderLinks(orderSlot);
         if (nextOrderSlot == NO_INDEX) {
             book.levelHeads[levelSlot] = NO_INDEX;
             book.levelTails[levelSlot] = NO_INDEX;
@@ -216,7 +213,12 @@ public class OrderBookImpl implements OrderBook {
         orderCapacity = newCapacity;
     }
 
-    private int[] growIntArray(int[] source, int newCapacity) {
+    private void clearOrderLinks(int orderSlot) {
+        orderPrev[orderSlot] = NO_INDEX;
+        orderNext[orderSlot] = NO_INDEX;
+    }
+
+    private static int[] growIntArray(int[] source, int newCapacity) {
         int oldLength = source.length;
         int[] copy = Arrays.copyOf(source, newCapacity);
         Arrays.fill(copy, oldLength, newCapacity, NO_INDEX);
@@ -396,6 +398,7 @@ public class OrderBookImpl implements OrderBook {
         private int nextPageSlot;
         private int freePageSlot = NO_INDEX;
 
+        // Active price pages live in a rebasing dense directory; each page covers 64 exact prices.
         private int[] levelHeads = filledIntArray(INITIAL_PAGE_SLOT_CAPACITY << PAGE_SHIFT, NO_INDEX);
         private int[] levelTails = filledIntArray(INITIAL_PAGE_SLOT_CAPACITY << PAGE_SHIFT, NO_INDEX);
 
@@ -653,18 +656,11 @@ public class OrderBookImpl implements OrderBook {
             int newCapacity = pageSlotCapacity << 1;
             pageKeys = Arrays.copyOf(pageKeys, newCapacity);
             pageMasks = Arrays.copyOf(pageMasks, newCapacity);
-            pageDirectoryIndexes = growIntArray(pageDirectoryIndexes, newCapacity);
-            pageNextFree = growIntArray(pageNextFree, newCapacity);
-            levelHeads = growIntArray(levelHeads, newCapacity << PAGE_SHIFT);
-            levelTails = growIntArray(levelTails, newCapacity << PAGE_SHIFT);
+            pageDirectoryIndexes = OrderBookImpl.growIntArray(pageDirectoryIndexes, newCapacity);
+            pageNextFree = OrderBookImpl.growIntArray(pageNextFree, newCapacity);
+            levelHeads = OrderBookImpl.growIntArray(levelHeads, newCapacity << PAGE_SHIFT);
+            levelTails = OrderBookImpl.growIntArray(levelTails, newCapacity << PAGE_SHIFT);
             pageSlotCapacity = newCapacity;
-        }
-
-        private int[] growIntArray(int[] source, int newCapacity) {
-            int oldLength = source.length;
-            int[] copy = Arrays.copyOf(source, newCapacity);
-            Arrays.fill(copy, oldLength, newCapacity, NO_INDEX);
-            return copy;
         }
 
         private int pageSlot(int levelSlot) {
@@ -677,160 +673,6 @@ public class OrderBookImpl implements OrderBook {
 
         private int levelRef(int pageSlot, int levelOffset) {
             return (pageSlot << PAGE_SHIFT) | levelOffset;
-        }
-    }
-
-    private static final class LongIntMap {
-        private long[] keys;
-        private int[] values;
-        private int size;
-        private final float loadFactor;
-        private final int missingValue;
-        private int resizeThreshold;
-
-        private LongIntMap(int capacity, float loadFactor, int missingValue) {
-            int actualCapacity = 1;
-            while (actualCapacity < capacity) {
-                actualCapacity <<= 1;
-            }
-            this.loadFactor = loadFactor;
-            this.missingValue = missingValue;
-            keys = new long[actualCapacity];
-            values = filledIntArray(actualCapacity, missingValue);
-            resizeThreshold = (int) (actualCapacity * loadFactor);
-        }
-
-        private int size() {
-            return size;
-        }
-
-        private int get(long key) {
-            int mask = values.length - 1;
-            int index = mix(key) & mask;
-            while (true) {
-                int value = values[index];
-                if (value == missingValue) {
-                    return missingValue;
-                }
-                if (keys[index] == key) {
-                    return value;
-                }
-                index = (index + 1) & mask;
-            }
-        }
-
-        private void put(long key, int value, int[] slotIndexes) {
-            if (size >= resizeThreshold) {
-                resize(slotIndexes);
-            }
-
-            int mask = values.length - 1;
-            int index = mix(key) & mask;
-            while (true) {
-                int current = values[index];
-                if (current == missingValue) {
-                    keys[index] = key;
-                    values[index] = value;
-                    slotIndexes[value] = index;
-                    size++;
-                    return;
-                }
-                if (keys[index] == key) {
-                    if (current != missingValue) {
-                        slotIndexes[current] = missingValue;
-                    }
-                    values[index] = value;
-                    slotIndexes[value] = index;
-                    return;
-                }
-                index = (index + 1) & mask;
-            }
-        }
-
-        private int remove(long key, int[] slotIndexes) {
-            int mask = values.length - 1;
-            int index = mix(key) & mask;
-            while (true) {
-                int current = values[index];
-                if (current == missingValue) {
-                    return missingValue;
-                }
-                if (keys[index] == key) {
-                    int removed = current;
-                    slotIndexes[removed] = missingValue;
-                    deleteIndex(index, slotIndexes);
-                    return removed;
-                }
-                index = (index + 1) & mask;
-            }
-        }
-
-        private void removeValue(int value, int[] slotIndexes) {
-            int index = slotIndexes[value];
-            if (index == missingValue) {
-                return;
-            }
-            slotIndexes[value] = missingValue;
-            deleteIndex(index, slotIndexes);
-        }
-
-        private void deleteIndex(int index, int[] slotIndexes) {
-            int mask = values.length - 1;
-            size--;
-            int gap = index;
-            int next = (index + 1) & mask;
-            while (true) {
-                int value = values[next];
-                if (value == missingValue) {
-                    values[gap] = missingValue;
-                    return;
-                }
-
-                int home = mix(keys[next]) & mask;
-                if (((next - home) & mask) >= ((gap - home) & mask)) {
-                    keys[gap] = keys[next];
-                    values[gap] = value;
-                    slotIndexes[value] = gap;
-                    gap = next;
-                }
-                next = (next + 1) & mask;
-            }
-        }
-
-        private void resize(int[] slotIndexes) {
-            long[] oldKeys = keys;
-            int[] oldValues = values;
-            keys = new long[oldKeys.length << 1];
-            values = filledIntArray(oldValues.length << 1, missingValue);
-            resizeThreshold = (int) (values.length * loadFactor);
-
-            int oldSize = size;
-            size = 0;
-            for (int i = 0; i < oldValues.length; i++) {
-                int value = oldValues[i];
-                if (value != missingValue) {
-                    reinsert(oldKeys[i], value, slotIndexes);
-                }
-            }
-            size = oldSize;
-        }
-
-        private void reinsert(long key, int value, int[] slotIndexes) {
-            int mask = values.length - 1;
-            int index = mix(key) & mask;
-            while (values[index] != missingValue) {
-                index = (index + 1) & mask;
-            }
-            keys[index] = key;
-            values[index] = value;
-            slotIndexes[value] = index;
-            size++;
-        }
-
-        private int mix(long key) {
-            long mixed = key ^ (key >>> 33);
-            mixed ^= mixed >>> 17;
-            return (int) mixed;
         }
     }
 }
