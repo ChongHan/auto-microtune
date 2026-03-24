@@ -1,0 +1,116 @@
+commit	cycle	score	improvement	status	description
+833fc55	baseline	980678.9778	0.00%	keep	baseline
+f923a0c	tick	152026.0751	84.50%	keep	replace sorted order lists with price levels and intrusive FIFO queues
+c455376	tock	239890.4007	-57.80%	discard	cache best levels and link price levels added more tree work than it saved
+fe5c01b	tick	142582.1776	6.21%	keep	use per-side heaps plus price hash maps for best-level selection
+8ab49b0	tock	113358.6950	20.50%	keep	remove empty levels from heaps eagerly instead of lazy stale cleanup
+84b8b47	tick	105285.3828	7.12%	keep	use primitive open-addressed long maps for orders and price levels
+df52ee5	tock	103551.1225	1.65%	keep	use backward-shift deletion in primitive maps to avoid reinsertion work
+51ea559	tick	119716.1451	-15.61%	discard	group price levels into 64-tick blocks for block-granularity best-price selection
+5f539ad	tock	94034.7358	9.19%	keep	use 4-ary heaps for price level selection instead of binary heaps
+86d232b	tick	516307.0973	-449.06%	discard	recompute the best price level by scanning the map only when the current best is removed
+1afffe6	tock	103024.3007	-9.56%	discard	raise primitive map load factor to trade fewer resizes for denser probes
+6dc73c2	tick	108125.3437	-14.98%	discard	recycle resting order nodes through a simple free list to cut allocations
+327b878	tock	92325.8864	1.82%	keep	pre-size order and level maps plus the price heaps to reduce resize churn
+b5667d8	tick	90420.8169	2.06%	keep	use a cheaper primitive-map hash mix to cut key hashing overhead
+233f591	tock	92639.8494	-2.45%	discard	lower only the order-id map load factor to favor lookups over density
+1f10e77	tick	95421.8417	-5.53%	discard	split buy and sell matching paths to remove side branches from the hot loop
+ea150bc	tock	90917.7293	-0.55%	discard	raise price heap fanout from 4-way to 8-way, not enough benefit to keep
+140f708	tick	97307.5041	-7.62%	discard	add a tiny side-local price-level cache ahead of the primitive level map
+971be6c	tock	90051.3471	0.41%	keep	lower only the price-level map load factor to favor exact level lookups
+d636965	tick	100521.1240	-11.63%	discard	group price levels into sparse pages while keeping heap-based best-price selection
+f81b826	tock	90232.3452	-0.20%	discard	reduce the initial price-heap capacity from 256 to 128
+7091322	tick	89245.8823	0.89%	discard	store heap prices in a parallel long array to reduce object dereferences in heap maintenance
+f1bb92e	tock	90926.0754	-0.97%	discard	increase the initial order-id map capacity from 4096 to 8192
+580e88c	tick	93418.3793	-3.74%	discard	cache only the most recently accessed exact price level inside each side book
+eac7726	tock	90734.4014	-0.76%	discard	remove the extra order-id map probe from modify by reusing the removed node metadata
+e52e105	tick	93413.9833	-3.73%	discard	store orders in primitive slot arrays and link them by integer indices
+4421cc2	tock	92691.3278	-2.93%	discard	inline the price crossing check inside matchOrder
+9420206	tick	87492.0511	2.84%	keep	specialize orderById into a dedicated long-to-order map to trim generic map overhead
+1e9c1a0	tock	89206.5348	-1.96%	discard	specialize the price-level map to trim generic casts on exact level lookup
+27aea5a	tick	86644.1958	0.97%	keep	derive order side from the owning book instead of storing it on each resting order
+d40b6be	tock	86813.1283	-0.19%	discard	lower the load factor on the specialized order-id map
+b7bff58	tick	87653.2207	-1.16%	discard	derive resting-order price from the owning level to shrink each order object
+b8d6dca	tock	88632.9176	-2.30%	discard	raise the price-level map load factor to improve locality on exact lookups
+305f851	tick	94560.0168	-9.14%	discard	replace backward-shift deletion in the order-id map with tombstones and periodic rehashing
+4be98e1	tick	99068.3482	-14.34%	discard	reuse resting-order nodes from a free list to cut per-invocation allocations
+cbcabad	tock	109641.3611	-26.54%	discard	recycle empty price-level objects inside each side book to cut allocation churn
+7e2a26d	tick	87863.1616	-1.41%	discard	use singly linked price queues with tombstoned cancels and front-pruning during matching
+4bf7196	tock	86730.8215	-0.10%	discard	keep singly linked tombstoned price queues but evict empty levels immediately and compact dead-heavy queues
+d48ecc5	tick	90380.9155	-4.31%	discard	split buy and sell add-match paths to remove side checks from the hot loop
+a4bd9cd	tock	88252.0324	-1.86%	discard	split full and partial match handling to simplify the hot maker loop
+e38322f	tick	88405.2442	-2.03%	discard	use a cheaper xor-fold hash mix for the price-level map
+b15ac26	tick	87986.3277	-1.55%	discard	use a cheaper mixed hash in the specialized order-id map
+8797316	tick	88118.9908	-1.70%	discard	cache the primitive-map mask instead of recomputing values.length minus one
+756da72	tock	88641.3245	-2.30%	discard	use one-probe get-or-create for price levels and remove matched heads directly
+d110499	tick	492682.2962	-468.63%	discard	sorted dense active levels made insertion/removal much slower than the heap
+a76ea2c	tock	86674.8478	-0.04%	discard	use hole moves in heap push and removal instead of repeated swaps
+8b33cc2	tick	271770.3872	-213.66%	discard	track active price levels in a sorted intrusive list instead of a heap
+e2791e7	tock	89416.9854	-3.20%	discard	pop fully matched maker heads directly instead of generic order unlink
+b2ad80a	tick	172303.9793	-98.86%	discard	replace the custom price-level heap and primitive map with TreeMap side books
+ca48bec	tock	92919.0753	-7.24%	discard	special-case empty best-level removal instead of routing through generic heap removal
+7aba65c	tick	95014.5741	-9.66%	discard	replace the primitive price-level map with a standard HashMap while keeping the heap
+212873b	tock	84433.0980	2.55%	keep	increase the initial order-id map capacity to 16384 to cut resize churn
+31b53dd	tick	91395.6178	-8.25%	discard	replace the specialized order-id map with a standard HashMap on top of the new larger capacity
+0f1761b	tock	93079.6194	-10.24%	discard	reduce the price-level heap fanout from four children to three
+bf18833	tick	122369.4957	-44.93%	discard	replace the custom side-book heap and price map with PriorityQueue plus HashMap
+ce8881e	tock	84431.6156	0.00%	keep	raise the price-level heap fanout from four children to five at no added complexity
+78035ce	tick	176419.1246	-108.95%	discard	replace the custom heap with a TreeSet of active prices while keeping primitive exact lookups
+a84e177	tock	85541.4387	-1.31%	discard	raise only the larger order-id map load factor from 0.6 to 0.7
+3c9b8ad	tick	158200.0072	-87.37%	discard	replace the custom price-level heap with a PriorityQueue of active prices while keeping primitive exact lookups
+ecfdf49	tock	86912.9354	-2.94%	discard	increase the initial price-level map capacity from 256 to 512
+e921b5b	tick	97371.6108	-15.33%	discard	use bucketed four-slot exact-lookup maps to shorten probe chains but delete reinsertion cost dominated
+ac6cf31	tock	86036.9861	-1.90%	discard	increase the initial order-id map capacity from 16384 to 32768 and it lost locality
+53f2b5c	tick	82753.8695	1.99%	keep	derive resting-order price from the owning level while caching the level price in hot loops
+22f62c2	tock	85205.2835	-2.96%	discard	replace the level owner reference with a side flag and route removals back through bids or asks
+63d8df9	tick	FAIL	NA	discard	embed singleton head orders inside price levels but the head-promotion bookkeeping failed FIFO and property tests
+35880df	tock	83676.6954	-1.12%	discard	cache the match listener in a local before the consume loop but it was slightly slower
+ec3e251	tick	490244.3023	-492.41%	discard	replace the price heap with sorted active-level arrays but insertion and removal shifts were catastrophic
+375e2e9	tock	84663.7490	-2.31%	discard	pop fully matched maker heads directly instead of routing through generic unlink logic
+10734b7	tock	83175.6105	-0.51%	discard	pre-size the price-level map to 2048 to avoid resizes but the larger table still trailed the baseline
+ab67ed5	tick	83105.0070	-0.42%	discard	embed singleton head orders in price levels to cut single-order level allocation but it added complexity without beating baseline
+203ce75	tock	87508.1957	-5.75%	discard	raise the price-heap fanout from five children to six and it lost clearly
+ba20169	tick	112117.1858	-35.48%	discard	replace the heap and level map with dynamic dense side ladders but the wide active spans made array expansion and footprint too expensive
+1279ccf	tock	84848.9370	-2.53%	discard	store price levels and resting quantities as ints internally but the narrower fields still lost
+675b308	tick	88596.3334	-7.06%	discard	store resting orders in primitive slot arrays while keeping the current heap and level map, but it was still slower
+bc16075	tock	85276.6562	-3.05%	discard	pre-size the price heap to 1024 to remove growth during replay but the larger heap hurt locality
+a74acdb	tick	83081.4232	-0.40%	discard	use singly linked price queues and scan within a level on cancel or modify, but it did not beat baseline
+8044a29	tock	86196.4441	-4.16%	discard	reduce the initial order-id map capacity to 4096 for locality, but it regressed clearly
+ff12b72	tick	123438.0173	-49.16%	discard	page active levels into 256-price buckets, but page lookup overhead dominated
+ca8daf2	tock	83772.9625	-1.23%	discard	remove matched heads directly and fuse modify into one lookup, but it still regressed
+a140f57	tick	80014.3524	3.31%	keep	replace object-based resting orders and price levels with primitive slot arrays
+64459ce	tock	78732.7176	1.60%	keep	reduce slot free-list writes and make heap ordering branchless with precomputed keys
+4775ff1	tick	74919.3668	4.84%	keep	make the order-id and price-level maps intrusive so removals can use stored probe slots
+c2a9409	tock	75650.3606	-0.98%	discard	use a cheaper xor-fold hash mix for the intrusive maps but the extra clustering outweighed it
+ca2c35f	tick	81592.0844	-8.91%	discard	add a direct-mapped hot-price cache to each side book, but the extra checks and invalidation cost dominated
+57389b6	tock	82982.2328	-10.76%	discard	manually unroll the five-way heap child scan inside siftDown and it regressed clearly
+d743eb2	tick	81556.8903	-8.86%	discard	replace backward-shift rehashing with robin-hood probe-length tracking in the intrusive maps and it lost clearly
+0048dfc	tock	75982.5456	-1.42%	discard	encode order side into the stored level reference to remove one metadata array and it still trailed baseline
+cf9a02d	tick	77537.2685	-3.49%	discard	specialize add and match into side-specific buy and sell paths but the duplicated hot loops still lost
+457d105	tock	76057.5022	-1.52%	discard	pre-size the order slot arrays to the larger order-map scale to avoid growth copies but it still lost
+054c2cf	tick	74986.2814	-0.09%	discard	pack each level queue head and tail into one long array but the added bit packing did not justify the extra complexity
+1386072	tock	74245.5942	0.90%	keep	lower only the price-level map load factor from 0.5 to 0.45 for slightly shorter exact-lookups
+78449a8	tick	74948.5485	-0.95%	discard	pack each order queue prev and next link into one long array but it still trailed the new baseline
+836d26e	tock	75864.0438	-2.18%	discard	lower only the order-id map load factor from 0.6 to 0.55 and it regressed clearly
+c874197	tick	75417.0583	-1.58%	discard	retry packed level head-tail queues on top of the 0.45 level-map baseline but it regressed clearly
+1fb657c	tock	74124.3935	0.16%	keep	lower only the price-level map load factor from 0.45 to 0.4 and it edged the baseline down again
+726efe2	tick	79940.4140	-7.85%%	discard	cache each map slot's mixed hash to avoid recomputing it during probes and deletes but the extra array hurt badly
+bba5d33	tock	72894.0272	1.66%	keep	lower only the price-level map load factor from 0.4 to 0.35 and it produced the clearest gain in this batch
+a632c24	tick	74210.3106	-1.81%	discard	cache heap keys alongside heap slots to remove level-key indirections during sift operations but it regressed
+5a67d7a	tock	73064.3171	-0.23%	discard	lower only the price-level map load factor from 0.35 to 0.3 and it stopped helping
+782d6f0	tick	71958.7794	1.28%	keep	specialize the side-book price-level map so it owns levelMapSlots directly instead of going through the generic intrusive map API
+e954941	tock	72426.2410	-0.65%	discard	lower the specialized price-level map load factor from 0.35 to 0.32 and it slipped backward
+f717ace	tick	71791.1942	0.23%	keep	specialize the order-id map so it owns orderMapSlots directly instead of using the generic intrusive map API
+b85db8f	tock	73031.2713	-1.73%	discard	let the specialized order map own orderMapSlots directly, but the cleanup lost performance
+66c666e	tick	71291.1524	0.70%	keep	encode order side in the stored level reference and drop the separate orderSides array on top of the specialized maps
+495b398	tock	70916.5195	0.53%	keep	lower the specialized order-id map load factor from 0.6 to 0.55 and it shaved the baseline down again
+ccd982a	tick	72937.1306	-2.85%	discard	retry direct order-map slot ownership on top of the specialized maps and leaner load factors, but it still regressed
+28ecfe1	tock	71374.1770	-0.65%	discard	lower the specialized order-id map load factor from 0.55 to 0.5 and it slipped backward
+8288cc5	tick	72951.5871	-2.87%	discard	split only the matching loop by incoming side to remove the crossing branch, but it still regressed
+3451943	tock	71322.6301	-0.57%	discard	keep the specialized order-map slot indexes in a dedicated field instead of passing them per call, but it still slipped backward
+f3f7afe	tick	72143.3274	-1.73%	discard	repack order prev and next links into one array on top of the specialized maps, but it still regressed
+6fe8aa7	tock	71885.1033	-1.37%	discard	lower the specialized price-level map load factor from 0.35 to 0.34 and it regressed
+f426664	tick	103513.5801	-45.97%	discard	group price levels into 64-price pages; page indirection and reset work dominated
+9a85140	tock	72179.6820	-1.78%	discard	remove duplicate-key update handling from the specialized intrusive maps but it still regressed
+5113473	tick	59596.5239	15.96%	keep	replace the level heap and price hash map with a dense rebasing page directory plus bitsets
+f416e48	tock	59394.0308	0.34%	keep	remove dead map code and tighten page-directory helpers without changing the winning architecture
