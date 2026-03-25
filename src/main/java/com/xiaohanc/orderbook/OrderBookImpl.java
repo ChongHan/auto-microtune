@@ -380,25 +380,33 @@ public class OrderBookImpl implements OrderBook {
 
     private static final class SideBook {
         private static final int INITIAL_PAGE_SLOT_CAPACITY = 256;
-        private static final int INITIAL_DIRECTORY_CAPACITY = 4096;
+        private static final int CORE_DIRECTORY_CAPACITY = 16384;
 
         private final boolean buySide;
 
-        private long basePageKey;
-        private boolean directoryInitialized;
-        private int[] directorySlots = filledIntArray(INITIAL_DIRECTORY_CAPACITY, NO_INDEX);
-        private long[] nonEmptyPageWords = new long[(INITIAL_DIRECTORY_CAPACITY + Long.SIZE - 1) / Long.SIZE];
+        private long coreBasePageKey;
+        private boolean coreInitialized;
+        private int[] directorySlots = filledIntArray(CORE_DIRECTORY_CAPACITY, NO_INDEX);
+        private long[] nonEmptyPageWords = new long[(CORE_DIRECTORY_CAPACITY + Long.SIZE - 1) / Long.SIZE];
         private long[] nonEmptyPageWordSummary = new long[(nonEmptyPageWords.length + Long.SIZE - 1) / Long.SIZE];
+
+        private int overflowRoot = NO_INDEX;
+        private int overflowBestPageSlot = NO_INDEX;
 
         private long[] pageKeys = new long[INITIAL_PAGE_SLOT_CAPACITY];
         private long[] pageMasks = new long[INITIAL_PAGE_SLOT_CAPACITY];
         private int[] pageDirectoryIndexes = filledIntArray(INITIAL_PAGE_SLOT_CAPACITY, NO_INDEX);
+        private int[] overflowLeft = filledIntArray(INITIAL_PAGE_SLOT_CAPACITY, NO_INDEX);
+        private int[] overflowRight = filledIntArray(INITIAL_PAGE_SLOT_CAPACITY, NO_INDEX);
+        private int[] overflowParent = filledIntArray(INITIAL_PAGE_SLOT_CAPACITY, NO_INDEX);
+        private int[] overflowPriorities = new int[INITIAL_PAGE_SLOT_CAPACITY];
         private int[] pageNextFree = filledIntArray(INITIAL_PAGE_SLOT_CAPACITY, NO_INDEX);
+        private int[] traversalStack = new int[INITIAL_PAGE_SLOT_CAPACITY];
         private int pageSlotCapacity = INITIAL_PAGE_SLOT_CAPACITY;
         private int nextPageSlot;
         private int freePageSlot = NO_INDEX;
 
-        // Active price pages live in a rebasing dense directory; each page covers 64 exact prices.
+        // The hot region stays in a fixed dense directory; far-out tails spill into the overflow tree.
         private int[] levelHeads = filledIntArray(INITIAL_PAGE_SLOT_CAPACITY << PAGE_SHIFT, NO_INDEX);
         private int[] levelTails = filledIntArray(INITIAL_PAGE_SLOT_CAPACITY << PAGE_SHIFT, NO_INDEX);
 
@@ -407,17 +415,11 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private int level(long price) {
-            if (!directoryInitialized) {
-                return NO_INDEX;
-            }
-
             long pageKey = price >> PAGE_SHIFT;
             int directoryIndex = directoryIndex(pageKey);
-            if (directoryIndex == NO_INDEX) {
-                return NO_INDEX;
-            }
-
-            int pageSlot = directorySlots[directoryIndex];
+            int pageSlot = directoryIndex == NO_INDEX
+                    ? findOverflowPage(pageKey)
+                    : directorySlots[directoryIndex];
             if (pageSlot == NO_INDEX) {
                 return NO_INDEX;
             }
@@ -428,21 +430,31 @@ public class OrderBookImpl implements OrderBook {
 
         private int addLevel(long price) {
             long pageKey = price >> PAGE_SHIFT;
-            ensureDirectoryContains(pageKey);
+            ensureCoreInitialized(pageKey);
             int directoryIndex = directoryIndex(pageKey);
+            if (directoryIndex == NO_INDEX) {
+                if (isBetterThanCore(pageKey)) {
+                    rebaseCore(pageKey);
+                    directoryIndex = directoryIndex(pageKey);
+                } else {
+                    return addOverflowLevel(pageKey, price);
+                }
+            }
+
             int pageSlot = directorySlots[directoryIndex];
             if (pageSlot == NO_INDEX) {
                 pageSlot = allocatePageSlot();
                 pageKeys[pageSlot] = pageKey;
                 pageMasks[pageSlot] = 0L;
+                overflowPriorities[pageSlot] = mixPageKey(pageKey);
                 pageDirectoryIndexes[pageSlot] = directoryIndex;
                 directorySlots[directoryIndex] = pageSlot;
             }
 
             int offset = (int) (price & PAGE_MASK);
-            long mask = pageMasks[pageSlot];
             long bit = 1L << offset;
-            if ((mask & bit) == 0) {
+            long mask = pageMasks[pageSlot];
+            if ((mask & bit) == 0L) {
                 pageMasks[pageSlot] = mask | bit;
                 if (mask == 0L) {
                     markPageActive(directoryIndex);
@@ -452,7 +464,16 @@ public class OrderBookImpl implements OrderBook {
         }
 
         private int bestLevel() {
-            int directoryIndex = bestPageIndex();
+            int directoryIndex = bestCorePageIndex();
+            if (directoryIndex == NO_INDEX) {
+                if (overflowBestPageSlot == NO_INDEX) {
+                    return NO_INDEX;
+                }
+
+                rebaseCore(pageKeys[overflowBestPageSlot]);
+                directoryIndex = bestCorePageIndex();
+            }
+
             if (directoryIndex == NO_INDEX) {
                 return NO_INDEX;
             }
@@ -476,46 +497,28 @@ public class OrderBookImpl implements OrderBook {
             pageMasks[pageSlot] = remainingMask;
             if (remainingMask == 0L) {
                 int directoryIndex = pageDirectoryIndexes[pageSlot];
-                directorySlots[directoryIndex] = NO_INDEX;
-                clearPageActive(directoryIndex);
+                if (directoryIndex == NO_INDEX) {
+                    unlinkOverflowPage(pageSlot);
+                } else {
+                    directorySlots[directoryIndex] = NO_INDEX;
+                    clearPageActive(directoryIndex);
+                }
                 releasePageSlot(pageSlot);
             }
         }
 
         private List<Integer> snapshotLevelSlots() {
             List<Integer> levelSlots = new ArrayList<>();
-            if (!directoryInitialized) {
+            if (!coreInitialized && overflowRoot == NO_INDEX) {
                 return levelSlots;
             }
 
             if (buySide) {
-                for (int directoryIndex = directorySlots.length - 1; directoryIndex >= 0; directoryIndex--) {
-                    int pageSlot = directorySlots[directoryIndex];
-                    if (pageSlot == NO_INDEX) {
-                        continue;
-                    }
-
-                    long mask = pageMasks[pageSlot];
-                    while (mask != 0L) {
-                        int offset = Long.SIZE - 1 - Long.numberOfLeadingZeros(mask);
-                        levelSlots.add(levelRef(pageSlot, offset));
-                        mask &= ~(1L << offset);
-                    }
-                }
+                appendCoreLevelsDescending(levelSlots);
+                appendOverflowLevelsDescending(levelSlots);
             } else {
-                for (int directoryIndex = 0; directoryIndex < directorySlots.length; directoryIndex++) {
-                    int pageSlot = directorySlots[directoryIndex];
-                    if (pageSlot == NO_INDEX) {
-                        continue;
-                    }
-
-                    long mask = pageMasks[pageSlot];
-                    while (mask != 0L) {
-                        int offset = Long.numberOfTrailingZeros(mask);
-                        levelSlots.add(levelRef(pageSlot, offset));
-                        mask &= mask - 1;
-                    }
-                }
+                appendCoreLevelsAscending(levelSlots);
+                appendOverflowLevelsAscending(levelSlots);
             }
             return levelSlots;
         }
@@ -524,59 +527,184 @@ public class OrderBookImpl implements OrderBook {
             return buySide ? Order.Side.BUY : Order.Side.SELL;
         }
 
-        private void ensureDirectoryContains(long pageKey) {
-            if (!directoryInitialized) {
-                basePageKey = pageKey - (directorySlots.length >>> 1);
-                directoryInitialized = true;
+        private void ensureCoreInitialized(long pageKey) {
+            if (!coreInitialized) {
+                coreBasePageKey = centeredBasePageKey(pageKey);
+                coreInitialized = true;
+            }
+        }
+
+        private int addOverflowLevel(long pageKey, long price) {
+            int pageSlot = findOverflowPage(pageKey);
+            if (pageSlot == NO_INDEX) {
+                pageSlot = allocatePageSlot();
+                pageKeys[pageSlot] = pageKey;
+                pageMasks[pageSlot] = 0L;
+                overflowPriorities[pageSlot] = mixPageKey(pageKey);
+                linkOverflowPage(pageSlot);
+            }
+
+            int offset = (int) (price & PAGE_MASK);
+            pageMasks[pageSlot] |= 1L << offset;
+            return levelRef(pageSlot, offset);
+        }
+
+        private void appendCoreLevelsDescending(List<Integer> levelSlots) {
+            if (!coreInitialized) {
                 return;
             }
 
-            if (directoryIndex(pageKey) != NO_INDEX) {
+            for (int directoryIndex = directorySlots.length - 1; directoryIndex >= 0; directoryIndex--) {
+                int pageSlot = directorySlots[directoryIndex];
+                if (pageSlot != NO_INDEX) {
+                    appendPageLevelsDescending(pageSlot, levelSlots);
+                }
+            }
+        }
+
+        private void appendCoreLevelsAscending(List<Integer> levelSlots) {
+            if (!coreInitialized) {
                 return;
             }
 
-            growDirectory(pageKey);
+            for (int directoryIndex = 0; directoryIndex < directorySlots.length; directoryIndex++) {
+                int pageSlot = directorySlots[directoryIndex];
+                if (pageSlot != NO_INDEX) {
+                    appendPageLevelsAscending(pageSlot, levelSlots);
+                }
+            }
+        }
+
+        private void appendOverflowLevelsDescending(List<Integer> levelSlots) {
+            int stackSize = 0;
+            int current = overflowRoot;
+            while (current != NO_INDEX || stackSize > 0) {
+                while (current != NO_INDEX) {
+                    traversalStack[stackSize++] = current;
+                    current = overflowRight[current];
+                }
+
+                current = traversalStack[--stackSize];
+                appendPageLevelsDescending(current, levelSlots);
+                current = overflowLeft[current];
+            }
+        }
+
+        private void appendOverflowLevelsAscending(List<Integer> levelSlots) {
+            int stackSize = 0;
+            int current = overflowRoot;
+            while (current != NO_INDEX || stackSize > 0) {
+                while (current != NO_INDEX) {
+                    traversalStack[stackSize++] = current;
+                    current = overflowLeft[current];
+                }
+
+                current = traversalStack[--stackSize];
+                appendPageLevelsAscending(current, levelSlots);
+                current = overflowRight[current];
+            }
+        }
+
+        private void appendPageLevelsDescending(int pageSlot, List<Integer> levelSlots) {
+            long mask = pageMasks[pageSlot];
+            while (mask != 0L) {
+                int offset = Long.SIZE - 1 - Long.numberOfLeadingZeros(mask);
+                levelSlots.add(levelRef(pageSlot, offset));
+                mask &= ~(1L << offset);
+            }
+        }
+
+        private void appendPageLevelsAscending(int pageSlot, List<Integer> levelSlots) {
+            long mask = pageMasks[pageSlot];
+            while (mask != 0L) {
+                int offset = Long.numberOfTrailingZeros(mask);
+                levelSlots.add(levelRef(pageSlot, offset));
+                mask &= mask - 1;
+            }
         }
 
         private int directoryIndex(long pageKey) {
-            long index = pageKey - basePageKey;
+            if (!coreInitialized) {
+                return NO_INDEX;
+            }
+
+            long index = pageKey - coreBasePageKey;
             return index >= 0 && index < directorySlots.length ? (int) index : NO_INDEX;
         }
 
-        private void growDirectory(long requiredPageKey) {
-            int oldCapacity = directorySlots.length;
-            int newCapacity = oldCapacity;
-            long newBase = basePageKey;
-            do {
-                newCapacity <<= 1;
-                newBase = basePageKey - ((long) (newCapacity - oldCapacity) >>> 1);
-            } while (requiredPageKey < newBase || requiredPageKey >= newBase + newCapacity);
+        private boolean isBetterThanCore(long pageKey) {
+            if (!coreInitialized) {
+                return true;
+            }
 
-            int[] oldDirectorySlots = directorySlots;
-            directorySlots = filledIntArray(newCapacity, NO_INDEX);
-            int shift = (int) (basePageKey - newBase);
-            System.arraycopy(oldDirectorySlots, 0, directorySlots, shift, oldCapacity);
-            basePageKey = newBase;
-
-            nonEmptyPageWords = new long[(newCapacity + Long.SIZE - 1) / Long.SIZE];
-            nonEmptyPageWordSummary = new long[(nonEmptyPageWords.length + Long.SIZE - 1) / Long.SIZE];
-            rebuildDirectoryState();
+            return buySide
+                    ? pageKey > coreBasePageKey + directorySlots.length - 1L
+                    : pageKey < coreBasePageKey;
         }
 
-        private void rebuildDirectoryState() {
+        private void rebaseCore(long anchorPageKey) {
+            long newBasePageKey = centeredBasePageKey(anchorPageKey);
+            if (coreInitialized && newBasePageKey == coreBasePageKey) {
+                return;
+            }
+
+            int[] oldDirectorySlots = directorySlots;
+            directorySlots = filledIntArray(oldDirectorySlots.length, NO_INDEX);
             Arrays.fill(nonEmptyPageWords, 0L);
             Arrays.fill(nonEmptyPageWordSummary, 0L);
-            Arrays.fill(pageDirectoryIndexes, NO_INDEX);
-            for (int directoryIndex = 0; directoryIndex < directorySlots.length; directoryIndex++) {
-                int pageSlot = directorySlots[directoryIndex];
+            coreBasePageKey = newBasePageKey;
+            coreInitialized = true;
+
+            for (int pageSlot : oldDirectorySlots) {
                 if (pageSlot == NO_INDEX) {
                     continue;
                 }
 
-                pageDirectoryIndexes[pageSlot] = directoryIndex;
-                if (pageMasks[pageSlot] != 0L) {
+                int directoryIndex = directoryIndex(pageKeys[pageSlot]);
+                if (directoryIndex == NO_INDEX) {
+                    pageDirectoryIndexes[pageSlot] = NO_INDEX;
+                    linkOverflowPage(pageSlot);
+                } else {
+                    directorySlots[directoryIndex] = pageSlot;
+                    pageDirectoryIndexes[pageSlot] = directoryIndex;
                     markPageActive(directoryIndex);
                 }
+            }
+
+            moveOverflowPagesIntoCore();
+        }
+
+        private long centeredBasePageKey(long anchorPageKey) {
+            return anchorPageKey - (directorySlots.length >>> 1);
+        }
+
+        private void moveOverflowPagesIntoCore() {
+            if (overflowRoot == NO_INDEX) {
+                return;
+            }
+
+            List<Integer> pagesToPromote = new ArrayList<>();
+            int stackSize = 0;
+            int current = overflowRoot;
+            while (current != NO_INDEX || stackSize > 0) {
+                while (current != NO_INDEX) {
+                    traversalStack[stackSize++] = current;
+                    current = overflowLeft[current];
+                }
+
+                current = traversalStack[--stackSize];
+                if (directoryIndex(pageKeys[current]) != NO_INDEX) {
+                    pagesToPromote.add(current);
+                }
+                current = overflowRight[current];
+            }
+
+            for (int pageSlot : pagesToPromote) {
+                unlinkOverflowPage(pageSlot);
+                int directoryIndex = directoryIndex(pageKeys[pageSlot]);
+                directorySlots[directoryIndex] = pageSlot;
+                pageDirectoryIndexes[pageSlot] = directoryIndex;
+                markPageActive(directoryIndex);
             }
         }
 
@@ -602,7 +730,7 @@ public class OrderBookImpl implements OrderBook {
             }
         }
 
-        private int bestPageIndex() {
+        private int bestCorePageIndex() {
             if (buySide) {
                 for (int summaryIndex = nonEmptyPageWordSummary.length - 1; summaryIndex >= 0; summaryIndex--) {
                     long summaryWord = nonEmptyPageWordSummary[summaryIndex];
@@ -630,6 +758,182 @@ public class OrderBookImpl implements OrderBook {
             return NO_INDEX;
         }
 
+        private int findOverflowPage(long pageKey) {
+            int current = overflowRoot;
+            while (current != NO_INDEX) {
+                long currentKey = pageKeys[current];
+                if (pageKey < currentKey) {
+                    current = overflowLeft[current];
+                } else if (pageKey > currentKey) {
+                    current = overflowRight[current];
+                } else {
+                    return current;
+                }
+            }
+            return NO_INDEX;
+        }
+
+        private void linkOverflowPage(int pageSlot) {
+            overflowLeft[pageSlot] = NO_INDEX;
+            overflowRight[pageSlot] = NO_INDEX;
+            overflowParent[pageSlot] = NO_INDEX;
+
+            if (overflowRoot == NO_INDEX) {
+                overflowRoot = pageSlot;
+                overflowBestPageSlot = pageSlot;
+                return;
+            }
+
+            long pageKey = pageKeys[pageSlot];
+            int current = overflowRoot;
+            while (true) {
+                if (pageKey < pageKeys[current]) {
+                    int left = overflowLeft[current];
+                    if (left == NO_INDEX) {
+                        overflowLeft[current] = pageSlot;
+                        overflowParent[pageSlot] = current;
+                        break;
+                    }
+                    current = left;
+                } else {
+                    int right = overflowRight[current];
+                    if (right == NO_INDEX) {
+                        overflowRight[current] = pageSlot;
+                        overflowParent[pageSlot] = current;
+                        break;
+                    }
+                    current = right;
+                }
+            }
+
+            bubbleUpOverflow(pageSlot);
+            if (isBetterPage(pageSlot, overflowBestPageSlot)) {
+                overflowBestPageSlot = pageSlot;
+            }
+        }
+
+        private void unlinkOverflowPage(int pageSlot) {
+            while (overflowLeft[pageSlot] != NO_INDEX || overflowRight[pageSlot] != NO_INDEX) {
+                int left = overflowLeft[pageSlot];
+                int right = overflowRight[pageSlot];
+                if (left == NO_INDEX) {
+                    rotateLeft(pageSlot);
+                } else if (right == NO_INDEX) {
+                    rotateRight(pageSlot);
+                } else if (overflowPriorities[left] < overflowPriorities[right]) {
+                    rotateRight(pageSlot);
+                } else {
+                    rotateLeft(pageSlot);
+                }
+            }
+
+            int parent = overflowParent[pageSlot];
+            if (parent == NO_INDEX) {
+                overflowRoot = NO_INDEX;
+            } else if (overflowLeft[parent] == pageSlot) {
+                overflowLeft[parent] = NO_INDEX;
+            } else {
+                overflowRight[parent] = NO_INDEX;
+            }
+
+            if (overflowBestPageSlot == pageSlot) {
+                overflowBestPageSlot = overflowRoot == NO_INDEX ? NO_INDEX : extremeOverflowPage(overflowRoot);
+            }
+        }
+
+        private void bubbleUpOverflow(int pageSlot) {
+            while (true) {
+                int parent = overflowParent[pageSlot];
+                if (parent == NO_INDEX || overflowPriorities[parent] <= overflowPriorities[pageSlot]) {
+                    return;
+                }
+
+                if (overflowLeft[parent] == pageSlot) {
+                    rotateRight(parent);
+                } else {
+                    rotateLeft(parent);
+                }
+            }
+        }
+
+        private void rotateLeft(int pageSlot) {
+            int pivot = overflowRight[pageSlot];
+            int pivotLeft = overflowLeft[pivot];
+            int parent = overflowParent[pageSlot];
+
+            overflowRight[pageSlot] = pivotLeft;
+            if (pivotLeft != NO_INDEX) {
+                overflowParent[pivotLeft] = pageSlot;
+            }
+
+            overflowLeft[pivot] = pageSlot;
+            overflowParent[pageSlot] = pivot;
+            overflowParent[pivot] = parent;
+
+            if (parent == NO_INDEX) {
+                overflowRoot = pivot;
+            } else if (overflowLeft[parent] == pageSlot) {
+                overflowLeft[parent] = pivot;
+            } else {
+                overflowRight[parent] = pivot;
+            }
+        }
+
+        private void rotateRight(int pageSlot) {
+            int pivot = overflowLeft[pageSlot];
+            int pivotRight = overflowRight[pivot];
+            int parent = overflowParent[pageSlot];
+
+            overflowLeft[pageSlot] = pivotRight;
+            if (pivotRight != NO_INDEX) {
+                overflowParent[pivotRight] = pageSlot;
+            }
+
+            overflowRight[pivot] = pageSlot;
+            overflowParent[pageSlot] = pivot;
+            overflowParent[pivot] = parent;
+
+            if (parent == NO_INDEX) {
+                overflowRoot = pivot;
+            } else if (overflowLeft[parent] == pageSlot) {
+                overflowLeft[parent] = pivot;
+            } else {
+                overflowRight[parent] = pivot;
+            }
+        }
+
+        private boolean isBetterPage(int candidatePageSlot, int currentBestPageSlot) {
+            if (currentBestPageSlot == NO_INDEX) {
+                return true;
+            }
+
+            long candidateKey = pageKeys[candidatePageSlot];
+            long currentBestKey = pageKeys[currentBestPageSlot];
+            return buySide ? candidateKey > currentBestKey : candidateKey < currentBestKey;
+        }
+
+        private int extremeOverflowPage(int startPageSlot) {
+            int current = startPageSlot;
+            if (buySide) {
+                while (overflowRight[current] != NO_INDEX) {
+                    current = overflowRight[current];
+                }
+            } else {
+                while (overflowLeft[current] != NO_INDEX) {
+                    current = overflowLeft[current];
+                }
+            }
+            return current;
+        }
+
+        private int mixPageKey(long pageKey) {
+            long mixed = pageKey + 0x9E3779B97F4A7C15L;
+            mixed = (mixed ^ (mixed >>> 30)) * 0xBF58476D1CE4E5B9L;
+            mixed = (mixed ^ (mixed >>> 27)) * 0x94D049BB133111EBL;
+            mixed ^= mixed >>> 31;
+            return (int) mixed;
+        }
+
         private int allocatePageSlot() {
             int pageSlot = freePageSlot;
             if (pageSlot != NO_INDEX) {
@@ -648,6 +952,9 @@ public class OrderBookImpl implements OrderBook {
         private void releasePageSlot(int pageSlot) {
             pageMasks[pageSlot] = 0L;
             pageDirectoryIndexes[pageSlot] = NO_INDEX;
+            overflowLeft[pageSlot] = NO_INDEX;
+            overflowRight[pageSlot] = NO_INDEX;
+            overflowParent[pageSlot] = NO_INDEX;
             pageNextFree[pageSlot] = freePageSlot;
             freePageSlot = pageSlot;
         }
@@ -657,7 +964,12 @@ public class OrderBookImpl implements OrderBook {
             pageKeys = Arrays.copyOf(pageKeys, newCapacity);
             pageMasks = Arrays.copyOf(pageMasks, newCapacity);
             pageDirectoryIndexes = OrderBookImpl.growIntArray(pageDirectoryIndexes, newCapacity);
+            overflowLeft = OrderBookImpl.growIntArray(overflowLeft, newCapacity);
+            overflowRight = OrderBookImpl.growIntArray(overflowRight, newCapacity);
+            overflowParent = OrderBookImpl.growIntArray(overflowParent, newCapacity);
+            overflowPriorities = Arrays.copyOf(overflowPriorities, newCapacity);
             pageNextFree = OrderBookImpl.growIntArray(pageNextFree, newCapacity);
+            traversalStack = Arrays.copyOf(traversalStack, newCapacity);
             levelHeads = OrderBookImpl.growIntArray(levelHeads, newCapacity << PAGE_SHIFT);
             levelTails = OrderBookImpl.growIntArray(levelTails, newCapacity << PAGE_SHIFT);
             pageSlotCapacity = newCapacity;

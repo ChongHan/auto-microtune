@@ -114,6 +114,53 @@ class OrderBookTest {
     }
 
     @Test
+    void testFarOutPriceLevelsRemainOrdered() {
+        orderBook.addOrder(1L, Order.Side.BUY, 100L, 10L);
+        orderBook.addOrder(2L, Order.Side.BUY, 1L, 5L);
+        orderBook.addOrder(3L, Order.Side.BUY, 99L, 7L);
+
+        List<Order> bids = orderBook.getBids();
+        assertEquals(List.of(1L, 3L, 2L), bids.stream().map(Order::id).toList());
+
+        orderBook.addOrder(4L, Order.Side.SELL, 101L, 4L);
+        orderBook.addOrder(5L, Order.Side.SELL, 1_000_000_000L, 2L);
+        orderBook.addOrder(6L, Order.Side.SELL, 102L, 3L);
+
+        List<Order> asks = orderBook.getAsks();
+        assertEquals(List.of(4L, 6L, 5L), asks.stream().map(Order::id).toList());
+    }
+
+    @Test
+    void testNegativeAndPositivePricesRemainOrderedAndMatch() {
+        orderBook.addOrder(1L, Order.Side.BUY, -5L, 2L);
+        orderBook.addOrder(2L, Order.Side.BUY, 3L, 4L);
+        orderBook.addOrder(3L, Order.Side.BUY, -1L, 1L);
+
+        List<Order> bids = orderBook.getBids();
+        assertEquals(List.of(2L, 3L, 1L), bids.stream().map(Order::id).toList());
+
+        orderBook.addOrder(4L, Order.Side.SELL, -2L, 3L);
+
+        bids = orderBook.getBids();
+        assertEquals(3, bids.size());
+        assertEquals(2L, bids.get(0).id());
+        assertEquals(1L, bids.get(0).quantity());
+        assertEquals(3L, bids.get(1).id());
+        assertEquals(1L, bids.get(1).quantity());
+        assertEquals(1L, bids.get(2).id());
+        assertEquals(2L, bids.get(2).quantity());
+        assertTrue(orderBook.getAsks().isEmpty());
+
+        orderBook.addOrder(5L, Order.Side.SELL, -10L, 1L);
+        bids = orderBook.getBids();
+        assertEquals(2, bids.size());
+        assertEquals(List.of(3L, 1L), bids.stream().map(Order::id).toList());
+        assertEquals(1L, bids.get(0).quantity());
+        assertEquals(2L, bids.get(1).quantity());
+        assertTrue(orderBook.getAsks().isEmpty());
+    }
+
+    @Test
     void testCancelOrder() {
         orderBook.addOrder(1L, Order.Side.BUY, 100L, 10L);
         orderBook.cancelOrder(1L);

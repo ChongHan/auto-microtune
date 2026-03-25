@@ -1,5 +1,8 @@
 # Experiment Summary
 
+This summary describes the optimization run as of commit `f416e48` (`tock: refactor dense page directory`).
+It documents the dense rebasing page-directory design at that commit, not the later hybrid working-tree variant.
+
 This document summarizes the optimization run recorded in [`results.tsv`](results.tsv).
 
 ## Outcome
@@ -87,6 +90,22 @@ The current architecture in [`src/main/java/com/xiaohanc/orderbook/OrderBookImpl
 - **Price Levels:** Each price level is an intrusive FIFO queue managed by `levelHeads` and `levelTails` arrays. Orders are linked using `orderNext` and `orderPrev` arrays.
 - **Order Lookup:** Uses a specialized intrusive open-addressed `OrderMap` (long-to-int). Removals are $O(1)$ because the map slot is stored with the order.
 - **Best-Price Selection:** A dense rebasing page directory where each page covers 64 exact prices. Active pages are tracked with bitsets (`nonEmptyPageWords`), and active prices within a page use a 64-bit mask (`pageMasks`).
+
+## Design Flaw And Follow-Up
+
+The dense rebasing page-directory design at commit `f416e48` is fast, but it has an important structural flaw:
+
+- the dense directory span is tied to the distance between the minimum and maximum observed active page keys
+- a small number of far-out prices can force the side book to maintain a large sparse dense window
+- this is acceptable for books whose active prices stay tightly clustered, but less robust for real books with a dense center and a thin tail of distant quotes
+
+In other words, the dense directory is efficient when the active region is compact, but it does not degrade gracefully when the book becomes sparse across a wide price range.
+
+That limitation is the reason for the later hybrid design, which keeps a bounded dense hot region and spills far-out pages into sparse overflow storage instead of letting the dense structure effectively scale with the full observed range.
+
+On a fresh benchmark of the current hybrid working tree run on March 25, 2026, `OrderBookBenchmark.replayOrders` measured `63516.268 us/op ± 3910.296`, versus the `f416e48` dense baseline of `59394.0308 us/op`, so the hybrid follow-up is currently about `6.94%` slower while addressing the range-sensitivity flaw.
+
+For the detailed follow-up design and a full data-structure walkthrough of the hybrid layout, see [`HYBRID_ORDERBOOK_VISUALIZATION.md`](HYBRID_ORDERBOOK_VISUALIZATION.md).
 
 ## Directory and Level Structure
 
